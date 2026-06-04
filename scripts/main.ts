@@ -1,4 +1,4 @@
-import { app, BrowserWindow, protocol } from "electron";
+import { app, BrowserWindow, protocol, systemPreferences } from "electron";
 import path from "path";
 import fs from "fs";
 import Module from "module";
@@ -293,8 +293,21 @@ app.whenReady().then(async () => {
             return { ok: false, error: "缺少url参数" };
           }
         },
+        getlocallanguage: () => {
+          // 获取应用区域设置
+
+          // macOS系统特定方法
+          if (process.platform === "darwin") {
+            const systemLocale = systemPreferences.getUserDefault("AppleLocale", "string");
+            return { ok: true, local: systemLocale };
+          }
+          const appLocale = app.getLocale();
+          return { ok: true, local: appLocale };
+        },
       };
+
       const handler = handlers[pathname];
+
       const responseData = handler ? handler() : { error: "未知接口" };
       return new Response(JSON.stringify(responseData), {
         headers: {

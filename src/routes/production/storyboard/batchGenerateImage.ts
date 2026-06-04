@@ -98,6 +98,8 @@ export default router.post(
         aspectRatio: projectSettingData?.videoRatio as `${number}:${number}`,
       };
       try {
+            console.log("%c Line:104 🍔 assetRecord", "background:#e41a6a", assetRecord);
+
         const imageCls = await u.Ai.Image(projectSettingData?.imageModel as `${string}:${string}`).run(
           {
             referenceList: await getAssetsImageBase64(assetRecord[item.id!] || []),

@@ -1,6 +1,6 @@
 /**
  * Toonflow AI供应商模板 - DeepSeek
- * @version 2.0
+ * @version 2.1
  */
 
 // ============================================================
@@ -127,7 +127,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "deepseek",
-  version: "2.0",
+  version: "2.1",
   author: "Toonflow",
   name: "DeepSeek",
   description:
@@ -155,28 +155,38 @@ const textRequest = (model: TextModel, think: boolean, thinkLevel: 0 | 1 | 2 | 3
   if (!vendor.inputValues.apiKey) throw new Error("缺少API Key");
   const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
 
-  // 仅当模型支持推理且用户明确开启时，才注入 thinking 参数
+  // DeepSeek 思考强度仅支持 high / max（low、medium 会被映射为 high，xhigh 会被映射为 max）
+  // thinkLevel: 0/1/2 → high, 3 → max
+  const effortMap: Record<0 | 1 | 2 | 3, "high" | "max"> = {
+    0: "high",
+    1: "high",
+    2: "high",
+    3: "max",
+  };
+
   const enableThinking = model.think && think;
-  const extraBody: Record<string, any> = {};
-
+  const extraBody: Record<string, any> = {
+    thinking: { type: enableThinking ? "enabled" : "disabled" },
+  };
   if (enableThinking) {
-    // DeepSeek API 规范：开启思考时需显式传入 type: "enabled"
-    extraBody.thinking = { type: "enabled" };
-
-    // 映射思考强度（low/medium 会统一映射为 high，xhigh 映射为 max）
-    const effortMap: Record<0 | 1 | 2 | 3, "high" | "max"> = {
-      0: "high",
-      1: "high",
-      2: "high",
-      3: "max",
-    };
     extraBody.reasoning_effort = effortMap[thinkLevel];
   }
-  return createDeepSeek({
+
+  return createOpenAICompatible({
     baseURL: vendor.inputValues.baseUrl,
     apiKey,
-    extraBody,
-  }).chat(model.modelName);
+    fetch: async (url: string, options?: RequestInit) => {
+      const rawBody = JSON.parse((options?.body as string) ?? "{}");
+      const modifiedBody = {
+        ...rawBody,
+        ...extraBody
+      };
+      return await fetch(url, {
+        ...options,
+        body: JSON.stringify(modifiedBody),
+      });
+    },
+  }).chatModel(model.modelName);
 };
 
 const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<string> => {
@@ -210,4 +220,5 @@ exports.videoRequest = videoRequest;
 exports.ttsRequest = ttsRequest;
 exports.checkForUpdates = checkForUpdates;
 exports.updateVendor = updateVendor;
+
 export { };

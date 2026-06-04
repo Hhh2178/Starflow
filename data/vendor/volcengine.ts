@@ -133,7 +133,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "volcengine",
-  version: "2.3",
+  version: "2.4",
   author: "leeqi",
   name: "火山引擎(豆包)",
   description: "火山引擎豆包大模型，支持文本、图片生成、视频生成等能力。\n\n需要在[火山引擎控制台](https://console.volcengine.com/ark)获取API密钥。",
@@ -418,17 +418,25 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
   }
 
   logger(`[图片生成] 请求模型: ${model.modelName}, 尺寸: ${body.size}`);
+  const res = await fetch(`${baseUrl}/images/generations`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`图片生成请求失败: ${errorText}`);
+  }
+  const response = await res.json();
+  logger(response);
 
-  const response = await axios.post(`${baseUrl}/images/generations`, body, { headers });
-  const data = response.data;
-
-  if (data?.error) {
-    throw new Error(`图片生成失败：${data.error.message || data.error.code}`);
+  if (response?.error) {
+    throw new Error(`图片生成失败：${response.error.message || response.error.code}`);
   }
 
   // 从 data 数组中提取第一张成功的图片
-  if (data?.data && data.data.length > 0) {
-    for (const item of data.data) {
+  if (response?.data && response.data.length > 0) {
+    for (const item of response.data) {
       if (item.url) {
         return await urlToBase64(item.url);
       }
@@ -581,9 +589,19 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
   }
 
   logger(`[视频生成] 提交任务, 模型: ${model.modelName}, 时长: ${config.duration}s, 分辨率: ${config.resolution}`);
+  const res = await fetch(`${baseUrl}/contents/generations/tasks`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+  });
 
-  const createResponse = await axios.post(`${baseUrl}/contents/generations/tasks`, body, { headers });
-  const taskId = createResponse.data?.id;
+  if (!res.ok) {
+    const errorText = await res.text();
+    throw new Error(`视频生成任务创建失败: ${errorText}`);
+  }
+  const createResponse = await res.json();
+  logger(createResponse);
+  const taskId = createResponse?.id;
 
   if (!taskId) {
     throw new Error("视频生成任务创建失败：未返回任务ID");
@@ -593,10 +611,17 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
 
   const result = await pollTask(
     async (): Promise<PollResult> => {
-      const queryResponse = await axios.get(`${baseUrl}/contents/generations/tasks/${taskId}`, { headers });
-      const task = queryResponse.data;
+      const queryRes = await fetch(`${baseUrl}/contents/generations/tasks/${taskId}`, {
+        method: "GET",
+        headers,
+      });
+      if (!queryRes.ok) {
+        const errorText = await queryRes.text();
+        throw new Error(`查询视频生成任务状态失败: ${errorText}`);
+      }
+      const task = await queryRes.json();
 
-      logger(`[视频生成] 任务状态: ${task.status}`);
+      logger(`[视频生成] 任务状态: ${JSON.stringify(task)}`);
 
       switch (task.status) {
         case "succeeded":
@@ -622,7 +647,7 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
     throw new Error(result.error);
   }
 
-  return await urlToBase64(result.data!);
+  return result.data!;
 };
 
 const ttsRequest = async (config: TTSConfig, model: TTSModel): Promise<string> => {

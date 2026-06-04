@@ -151,7 +151,6 @@ export default router.post(
     }
 
     const artStyle = projectData?.artStyle || "无";
-          console.log("%c Line:158 🍢", "background:#ffdd4d",assets);
 
     const visualManual = u.getArtPrompt(artStyle, "art_skills", "art_storyboard_video");
     const content = `
@@ -168,7 +167,6 @@ export default router.post(
 ></storyboardItem>`,
           )},
           `;
-    console.log("%c Line:156 🍬 content", "background:#4fff4B", content);
 
     try {
       const { text } = await u.Ai.Text("universalAi").invoke({

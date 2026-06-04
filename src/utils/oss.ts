@@ -182,30 +182,30 @@ class OSS {
   async getSmallImageUrl(userRelPath: string): Promise<string> {
     // 构造缩略图相对路径：在原路径的目录层级前插入 smallImage 目录
     // 例如：123/abc.jpg => smallImage/123/abc.jpg
-    const smallImageRelPath = `smallImage/${userRelPath.replace(/^[/\\]+/, "")}`;
+    // const smallImageRelPath = `smallImage/${userRelPath.replace(/^[/\\]+/, "")}`;
 
-    if (await this.fileExists(smallImageRelPath)) {
-      return this.getFileUrl(smallImageRelPath);
-    }
+    // if (await this.fileExists(smallImageRelPath)) {
+    //   return this.getFileUrl(smallImageRelPath);
+    // }
 
-    // 缩略图不存在：同步生成，生成失败则返回原图 URL
-    const originalUrl = await this.getFileUrl(userRelPath);
+    // // 缩略图不存在：同步生成，生成失败则返回原图 URL
+    // const originalUrl = await this.getFileUrl(userRelPath);
 
-    try {
-      await this.ensureInit();
-      const srcAbsPath = resolveSafeLocalPath(userRelPath, this.rootDir);
-      const dstAbsPath = resolveSafeLocalPath(smallImageRelPath, this.rootDir);
-      await fs.mkdir(path.dirname(dstAbsPath), { recursive: true });
-      await sharp(srcAbsPath)
-        .resize(512, 512, { fit: "inside", withoutEnlargement: true })
-        .toFile(dstAbsPath);
-      console.info(`[${dstAbsPath}]小图写入成功`);
-      return this.getFileUrl(smallImageRelPath);
-    } catch (e) {
-      // 生成失败返回原图
-      console.warn("[OSS] 生成缩略图失败:", e);
-      return originalUrl;
-    }
+    // try {
+    //   await this.ensureInit();
+    //   const srcAbsPath = resolveSafeLocalPath(userRelPath, this.rootDir);
+    //   const dstAbsPath = resolveSafeLocalPath(smallImageRelPath, this.rootDir);
+    //   await fs.mkdir(path.dirname(dstAbsPath), { recursive: true });
+    //   await sharp(srcAbsPath)
+    //     .resize(512, 512, { fit: "inside", withoutEnlargement: true })
+    //     .toFile(dstAbsPath);
+    //   console.info(`[${dstAbsPath}]小图写入成功`);
+    return (await this.getFileUrl(userRelPath)) + "?size=20";
+    // } catch (e) {
+    //   // 生成失败返回原图
+    //   console.warn("[OSS] 生成缩略图失败:", e);
+    //   return originalUrl;
+    // }
   }
 }
 

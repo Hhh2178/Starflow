@@ -153,6 +153,7 @@ export default router.post(
             flowId: i.flowId,
           }))
           .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
+        flowData.script = scriptData?.content ?? "";
         res.status(200).send(success(flowData));
       } catch (err) {
         res.status(400).send(error());

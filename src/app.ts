@@ -14,6 +14,7 @@ import u from "@/utils";
 import jwt from "jsonwebtoken";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
+import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
 
 const app = express();
 const server = http.createServer(app);
@@ -64,7 +65,58 @@ export default async function startServe(randomPort: Boolean = false) {
     fs.mkdirSync(ossDir, { recursive: true });
   }
   console.log("文件目录:", ossDir);
-  app.use("/oss", express.static(ossDir, { acceptRanges: false }));
+  app.use(
+    "/oss",
+    (req, res, next) => {
+      // 如果传参 type=small，则返回小图
+      if (req.query.size) {
+        const size = req.query.size as string;
+        const smallImageBaseDir = path.join(ossDir, "smallImage");
+        const originalPath = path.join(ossDir, req.path);
+
+        // 解析 size 参数
+        let sizeSubDir: string;
+        let sizeOpts: ThumbnailSize | undefined;
+
+        // 判断是否为 WIDTHxHEIGHT 格式，如 "200x300"：等比压缩到指定宽高边界
+        const dimensMatch = size.match(/^(\d+)x(\d+)$/i);
+        // 判断是否为百分比格式，如 "30"、"30%"：等比压缩到原图的指定百分比
+        const percentMatch = size.match(/^(\d+(?:\.\d+)?)\s*%?$/);
+
+        if (dimensMatch) {
+          const w = parseInt(dimensMatch[1], 10);
+          const h = parseInt(dimensMatch[2], 10);
+          sizeSubDir = `${w}x${h}`;
+          sizeOpts = { type: "dimensions", width: w, height: h };
+        } else if (percentMatch) {
+          const pct = parseFloat(percentMatch[1]);
+          sizeSubDir = `${percentMatch[1]}p`;
+          sizeOpts = { type: "percentage", value: pct };
+        } else {
+          // 无效的 size 参数，降级返回原图
+          express.static(ossDir, { acceptRanges: false })(req, res, next);
+          return;
+        }
+
+        const ext = path.extname(req.path);
+        const base = path.basename(req.path, ext);
+        const dir = path.dirname(req.path);
+        const smallImagePath = path.join(smallImageBaseDir, dir, `${base}_${sizeSubDir}${ext}`);
+
+        ensureThumbnail(originalPath, smallImagePath, sizeOpts).then((thumbnailPath) => {
+          if (thumbnailPath) {
+            res.sendFile(thumbnailPath);
+          } else {
+            // 缩略图生成失败，降级返回原图
+            express.static(ossDir, { acceptRanges: false })(req, res, next);
+          }
+        });
+        return;
+      }
+      next();
+    },
+    express.static(ossDir, { acceptRanges: false }),
+  );
   // skills 静态资源
   const skillsDir = u.getPath("skills");
   if (!fs.existsSync(skillsDir)) {

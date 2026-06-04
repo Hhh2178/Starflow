@@ -1,6 +1,6 @@
 /**
  * Toonflow官方中转平台 供应商适配
- * @version 2.0
+ * @version 3.0
  */
 
 // ============================================================
@@ -133,7 +133,7 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "toonflow",
-  version: "2.0",
+  version: "3.0",
   author: "Toonflow",
   name: "Toonflow官方中转平台",
   description:
@@ -145,46 +145,29 @@ const vendor: VendorConfig = {
     baseUrl: "https://api.toonflow.net/v1",
   },
   models: [
-    { name: "claude-sonnet-4-6", type: "text", modelName: "claude-sonnet-4-6", think: false },
-    { name: "claude-opus-4-6", type: "text", modelName: "claude-opus-4-6", think: false },
-    { name: "claude-sonnet-4-5-20250929", type: "text", modelName: "claude-sonnet-4-5-20250929", think: false },
-    { name: "claude-opus-4-5-20251101", type: "text", modelName: "claude-opus-4-5-20251101", think: false },
-    { name: "claude-haiku-4-5-20251001", type: "text", modelName: "claude-haiku-4-5-20251001", think: false },
-    { name: "gpt-5.4", type: "text", modelName: "gpt-5.4", think: false },
-    { name: "gpt-5.2", type: "text", modelName: "gpt-5.2", think: false },
-    { name: "MiniMax-M2.7", type: "text", modelName: "MiniMax-M2.7", think: true },
-    { name: "MiniMax-M2.5", type: "text", modelName: "MiniMax-M2.5", think: true },
     {
-      name: "Wan2.6 I2V 1080P (支持真人)",
+      name: "Wan2.6 (支持真人)",
       type: "video",
-      modelName: "Wan2.6-I2V-1080P",
-      mode: ["text", "startEndRequired"],
-      durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["1080p"] }],
-      audio: true,
-    },
-    {
-      name: "Wan2.6 I2V 720P (支持真人)",
-      type: "video",
-      modelName: "Wan2.6-I2V-720P",
-      mode: ["text", "startEndRequired"],
-      durationResolutionMap: [{ duration: [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["720p"] }],
+      modelName: "wan2.6",
+      mode: ["singleImage"],
+      durationResolutionMap: [{ duration: [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["720p", "1080p"] }],
       audio: true,
     },
     {
       name: "Seedance 1.5 Pro",
       type: "video",
-      modelName: "doubao-seedance-1-5-pro-251215",
+      modelName: "doubao-seedance-1-5-pro",
       mode: ["text", "endFrameOptional"],
       durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12], resolution: ["480p", "720p", "1080p"] }],
       audio: true,
     },
     {
-      name: "vidu2 turbo",
+      name: "Seedance-2.0",
+      modelName: "Seedance 2.0",
       type: "video",
-      modelName: "ViduQ2-turbo",
-      mode: ["singleImage", "startEndRequired"],
-      durationResolutionMap: [{ duration: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], resolution: ["540p", "720p", "1080p"] }],
-      audio: false,
+      mode: ["text", "startFrameOptional", ["imageReference:9", "videoReference:3", "audioReference:3"]],
+      audio: "optional",
+      durationResolutionMap: [{ duration: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], resolution: ["480p", "720p"] }],
     },
     {
       name: "ViduQ3 pro",
@@ -195,25 +178,33 @@ const vendor: VendorConfig = {
       audio: false,
     },
     {
-      name: "ViduQ2 pro",
+      name: "Kling-Video-O1",
+      modelName: "Kling-Video-O1",
       type: "video",
-      modelName: "ViduQ2-pro",
-      mode: ["singleImage", "startEndRequired"],
-      durationResolutionMap: [{ duration: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], resolution: ["540p", "720p", "1080p"] }],
-      audio: false,
+      mode: ["startFrameOptional", ["imageReference:7", "videoReference:1"]],
+      audio: "optional",
+      durationResolutionMap: [{ duration: [5, 10, 15], resolution: ["720p", "1080p"] }],
+    },
+    {
+      name: "Kling-V3-Omni",
+      modelName: "Kling-V3-Omni",
+      type: "video",
+      mode: ["startFrameOptional", ["imageReference:7", "videoReference:1"]],
+      audio: "optional",
+      durationResolutionMap: [{ duration: [5, 10, 15], resolution: ["720p", "1080p"] }],
     },
     {
       name: "Doubao Seedream 5.0 Lite",
       type: "image",
-      modelName: "Doubao-Seedream-5.0-Lite",
+      modelName: "doubao-seedream-5.0-Lite",
       mode: ["text", "singleImage", "multiReference"],
     },
     {
       name: "Doubao Seedream 4.5",
       type: "image",
-      modelName: "doubao-seedream-4-5-251128",
+      modelName: "doubao-seedream-4-5",
       mode: ["text", "singleImage", "multiReference"],
-    },
+    }
   ],
 };
 
@@ -238,6 +229,32 @@ function extractFirstImageFromMd(content: string) {
 const textRequest = (model: TextModel, think: boolean, thinkLevel: 0 | 1 | 2 | 3) => {
   if (!vendor.inputValues.apiKey) throw new Error("缺少API Key");
   const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
+  const lowerName = model.modelName.toLowerCase();
+  if (lowerName.includes("deepseek")) {
+    logger("使用deepseek");
+    // DeepSeek 思考强度仅支持 high / max（low、medium 会被映射为 high，xhigh 会被映射为 max）
+    // thinkLevel: 0/1/2 → high, 3 → max
+    const effortMap: Record<0 | 1 | 2 | 3, "high" | "max"> = {
+      0: "high",
+      1: "high",
+      2: "high",
+      3: "max",
+    };
+
+    const enableThinking = model.think && think;
+    const extraBody: Record<string, any> = {
+      thinking: { type: enableThinking ? "enabled" : "disabled" },
+    };
+    if (enableThinking) {
+      extraBody.reasoning_effort = effortMap[thinkLevel];
+    }
+
+    return createDeepSeek({
+      baseURL: vendor.inputValues.baseUrl,
+      apiKey,
+      extraBody,
+    }).chat(model.modelName);
+  }
   return createOpenAI({ baseURL: vendor.inputValues.baseUrl, apiKey }).chat(model.modelName);
 };
 
@@ -246,7 +263,7 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
   const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
   const baseUrl = vendor.inputValues.baseUrl;
   const lowerName = model.modelName.toLowerCase();
-  const imageBase64List = (config.referenceList ?? []).map((r) => r.base64);
+  const imageBase64List = (config.referenceList ?? []).map((r) => r.base64).filter(Boolean);
 
   // Gemini / nano 系模型：走 chat/completions 接口，从返回的 markdown 中提取图片
   if (lowerName.includes("gemini") || lowerName.includes("nano")) {
@@ -296,14 +313,16 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
       model: model.modelName,
       prompt: config.prompt,
       size: resolvedSize,
-      response_format: "url",
-      sequential_image_generation: "disabled",
-      stream: false,
-      watermark: false,
-      ...(imageBase64List.length && { image: imageBase64List }),
+      metadata: {
+        response_format: "url",
+        sequential_image_generation: "disabled",
+        stream: false,
+        watermark: false,
+      },
+      ...(imageBase64List.length && { images: imageBase64List }),
     };
     logger(`[imageRequest] 使用 doubao 适配器，模型: ${model.modelName}`);
-    const response = await fetch(`${baseUrl}/images/generations`, {
+    const response = await fetch(`${baseUrl}/image/generateImage`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -313,8 +332,91 @@ const imageRequest = async (config: ImageConfig, model: ImageModel): Promise<str
       throw new Error(`请求失败，状态码: ${response.status}, 错误信息: ${errorText}`);
     }
     const data = await response.json();
-    const resultUrl = data.data[0].url;
-    return await urlToBase64(resultUrl);
+    const taskId = data.data;
+    logger(`[imageRequest] 任务ID: ${taskId}`);
+    const res = await pollTask(async () => {
+      const queryResponse = await fetch(`${baseUrl}/image/getImageStatus`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskICode: taskId,
+        }),
+      });
+      if (!queryResponse.ok) {
+        const errorText = await queryResponse.text();
+        throw new Error(`轮询失败，状态码: ${queryResponse.status}, 错误信息: ${errorText}`);
+      }
+      const queryData = await queryResponse.json();
+      logger(queryData);
+      const status = queryData?.status ?? queryData?.data?.status;
+      logger(status);
+      switch (status) {
+        case "success":
+          return { completed: true, data: queryData.data.data };
+        case "failed":
+          return { completed: true, error: queryData?.data?.failReason ?? "视频生成失败" };
+        default:
+          return { completed: false };
+      }
+    });
+    return res.data!;
+  }
+  if (lowerName.includes("gpt") || lowerName.includes("全能图片")) {
+    const normalizedSize = config.size === "1K" ? "1k" : config.size === "2K" ? "2k" : config.size === "4K" ? "4k" : config.size;
+
+    const sizeMap: Record<string, Record<string, string>> = {
+      "16:9": { "1K": "1792x1008", "2K": "2048x1152", "4K": "3840x2160" },
+      "9:16": { "1K": "1008x1792", "2K": "1152x2048", "4K": "2160x3840" },
+    };
+    const resolvedSize = sizeMap[config.aspectRatio]?.[normalizedSize];
+    const body: Record<string, any> = {
+      model: model.modelName,
+      prompt: config.prompt,
+      size: normalizedSize,
+      ...(imageBase64List.length && { images: imageBase64List }),
+      metadata: {
+        aspectRatio: config.aspectRatio,
+      },
+    };
+    logger(`[imageRequest] 使用 doubao 适配器，模型: ${model.modelName}`);
+    const response = await fetch(`${baseUrl}/image/generateImage`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`请求失败，状态码: ${response.status}, 错误信息: ${errorText}`);
+    }
+    const data = await response.json();
+    const taskId = data.data;
+    logger(`[imageRequest] 任务ID: ${taskId}`);
+    const res = await pollTask(async () => {
+      const queryResponse = await fetch(`${baseUrl}/image/getImageStatus`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskICode: taskId,
+        }),
+      });
+      if (!queryResponse.ok) {
+        const errorText = await queryResponse.text();
+        throw new Error(`轮询失败，状态码: ${queryResponse.status}, 错误信息: ${errorText}`);
+      }
+      const queryData = await queryResponse.json();
+      logger(queryData);
+      const status = queryData?.status ?? queryData?.data?.status;
+      logger(status);
+      switch (status) {
+        case "success":
+          return { completed: true, data: queryData.data.data };
+        case "failed":
+          return { completed: true, error: queryData?.data?.failReason ?? "视频生成失败" };
+        default:
+          return { completed: false };
+      }
+    });
+    return res.data!;
   }
 
   throw new Error(`不支持的图像模型: ${model.modelName}`);
@@ -327,7 +429,7 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
   const lowerName = model.modelName.toLowerCase();
 
   // 当前激活的单一 VideoMode（取第一个非数组模式，或数组模式）
-  const activeMode = config.mode;
+  const activeMode = config.mode as string | string[];
   const imageRefs = (config.referenceList ?? []).filter((r) => r.type === "image").map((r) => r.base64);
   const videoRefs = (config.referenceList ?? []).filter((r) => r.type === "video").map((r) => r.base64);
   const audioRefs = (config.referenceList ?? []).filter((r) => r.type === "audio").map((r) => r.base64);
@@ -345,22 +447,16 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
     }
     if (typeof config.audio === "boolean") metadata.audio = config.audio;
 
-    // 万象需要额外传 size 字段
-    const wanSizeMap: Record<string, Record<string, string>> = {
-      "480p": { "16:9": "832*480", "9:16": "480*832" },
-      "720p": { "16:9": "1280*720", "9:16": "720*1280" },
-      "1080p": { "16:9": "1920*1080", "9:16": "1080*1920" },
-    };
-    const wanSize = wanSizeMap[config.resolution]?.[config.aspectRatio];
     const body: Record<string, any> = {
       model: model.modelName,
       prompt: config.prompt,
       duration: config.duration,
-      size: wanSize,
+      resolution: config.resolution,
+      images: imageRefs,
       metadata,
     };
     logger(`[videoRequest] 提交万象视频任务，模型: ${model.modelName}`);
-    const response = await fetch(`${baseUrl}/video/generations`, {
+    const response = await fetch(`${baseUrl}/video/generateVideo`, {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -370,33 +466,38 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
       throw new Error(`请求失败，状态码: ${response.status}, 错误信息: ${errorText}`);
     }
     const data = await response.json();
-    const taskId = data.id;
+    const taskId = data.data;
     logger(`[videoRequest] 万象任务ID: ${taskId}`);
     const res = await pollTask(async () => {
-      const queryResponse = await fetch(`${baseUrl}/video/generations/${taskId}`, {
-        method: "GET",
+      const queryResponse = await fetch(`${baseUrl}/video/getVideoStatus`, {
+        method: "POST",
         headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          taskICode: taskId,
+        }),
       });
       if (!queryResponse.ok) {
         const errorText = await queryResponse.text();
         throw new Error(`轮询失败，状态码: ${queryResponse.status}, 错误信息: ${errorText}`);
       }
       const queryData = await queryResponse.json();
+      logger(queryData);
       const status = queryData?.status ?? queryData?.data?.status;
+      logger(status);
       switch (status) {
         case "completed":
         case "SUCCESS":
         case "success":
-          return { completed: true, data: queryData.data.result_url };
+          return { completed: true, data: queryData.data.data };
         case "FAILURE":
         case "failed":
-          return { completed: true, error: queryData?.data?.fail_reason ?? "视频生成失败" };
+          return { completed: true, error: queryData?.data?.failReason ?? "视频生成失败" };
         default:
           return { completed: false };
       }
     });
     if (res.error) throw new Error(res.error);
-    return await urlToBase64(res.data!);
+    return res.data!;
   }
 
   if (lowerName.includes("doubao") || lowerName.includes("seedance")) {
@@ -404,18 +505,58 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
     metadata = {
       ...(typeof config.audio === "boolean" && { generate_audio: config.audio }),
       ratio: config.aspectRatio,
-      image_roles: [] as string[],
-      references: [] as string[],
+      references: [],
+      resolution: config.resolution,
     };
     if (Array.isArray(activeMode)) {
       // 多参考模式
-      imageRefs.forEach((b) => metadata.references.push(b));
-      videoRefs.forEach((b) => metadata.references.push(b));
-      audioRefs.forEach((b) => metadata.references.push(b));
+      imageRefs.forEach((item) => {
+        metadata.references.push({
+          role: "reference_image",
+          type: "image_url",
+          image_url: {
+            url: item,
+          },
+        });
+      });
+      videoRefs.forEach((item) => {
+        metadata.references.push({
+          role: "reference_video",
+          type: "video_url",
+          video_url: {
+            url: item,
+          },
+        });
+      });
+      audioRefs.forEach((item) => {
+        metadata.references.push({
+          role: "reference_audio",
+          type: "audio_url",
+          audio_url: {
+            url: item,
+          },
+        });
+      });
     } else if (activeMode === "startEndRequired" || activeMode === "endFrameOptional" || activeMode === "startFrameOptional") {
-      imageRefs.forEach((_, i) => (metadata.image_roles as string[]).push(i === 0 ? "first_frame" : "last_frame"));
+      imageRefs.forEach((item, i) => {
+        metadata.references.push({
+          type: "image_url",
+          image_url: {
+            url: item,
+          },
+          role: i == 0 ? "first_frame" : "last_frame",
+        });
+      });
     } else if (activeMode === "singleImage") {
-      imageRefs.forEach(() => (metadata.image_roles as string[]).push("reference_image"));
+      imageRefs.forEach((item, i) => {
+        metadata.references.push({
+          role: "reference_image",
+          type: "image_url",
+          image_url: {
+            url: item,
+          },
+        });
+      });
     }
   } else if (lowerName.includes("vidu")) {
     // Vidu 系列
@@ -425,33 +566,75 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
       off_peak: false,
     };
   } else if (lowerName.includes("kling")) {
-    // 可灵系列
-    metadata = { aspect_ratio: config.aspectRatio };
-    if (Array.isArray(activeMode)) {
-      metadata.reference = [...imageRefs, ...videoRefs, ...audioRefs];
-    } else if (activeMode === "endFrameOptional" && imageRefs.length) {
-      metadata.image_tail = imageRefs[0];
-    } else if (activeMode === "startEndRequired" && imageRefs.length >= 2) {
-      metadata.image_list = [
-        { image_url: imageRefs[0], type: "first_frame" },
-        { image_url: imageRefs[1], type: "last_frame" },
-      ];
-    } else if (activeMode === "singleImage" && imageRefs.length) {
-      metadata.image = imageRefs[0];
+    const videoRefs = (config.referenceList ?? []).filter((r) => r.type === "video").map((r) => ({ video_url: r.base64 }));
+
+    metadata = {
+      aspect_ratio: config.aspectRatio,
+      sound: typeof config?.audio == "boolean" ? (config?.audio ? "on" : "off") : "off",
+      video_list: videoRefs,
+      image_list: [],
+    };
+
+    // 图片有效性检查函数
+    const isValidImage = (imageUrl: any) => {
+      return imageUrl && typeof imageUrl === "string" && imageUrl.trim().length > 0;
+    };
+
+    if (activeMode === "singleImage") {
+      if (lowerName.includes("omni") || lowerName.includes("o1")) {
+        // 只在图片有效时才添加
+        if (isValidImage(imageRefs[0])) {
+          metadata.image_list = [{ image_url: imageRefs[0] }];
+        }
+      } else {
+        if (isValidImage(imageRefs[0])) {
+          metadata.image = imageRefs[0];
+        }
+      }
+    } else if (activeMode === "startEndRequired" || activeMode === "endFrameOptional" || activeMode === "startFrameOptional") {
+      if (lowerName.includes("omni") || lowerName.includes("o1")) {
+        imageRefs.forEach((item, index) => {
+          if (isValidImage(item)) {
+            if (!metadata.image_list || !Array.isArray(metadata.image_list)) metadata.image_list = [];
+            metadata.image_list.push({
+              image_url: item,
+              type: index == 0 ? "first_frame" : "end_frame",
+            });
+          }
+        });
+      } else {
+        if (isValidImage(imageRefs[0])) {
+          metadata.image_tail = imageRefs[0];
+        }
+      }
+    } else if (Array.isArray(activeMode)) {
+      imageRefs.forEach((item) => {
+        if (isValidImage(item)) {
+          if (!metadata.image_list || !Array.isArray(metadata.image_list)) metadata.image_list = [];
+          metadata.image_list.push({
+            image_url: item,
+          });
+        }
+      });
     }
+  } else if (lowerName.includes("grok")) {
+    metadata = {
+      aspectRatio: config.aspectRatio,
+    };
   }
 
   // 公共请求体（非万象通用路径）
   const publicBody: Record<string, any> = {
     model: model.modelName,
-    ...(!Array.isArray(activeMode) && imageRefs.length ? { images: imageRefs } : {}),
+    ...(imageRefs.length ? { images: imageRefs } : {}),
     prompt: config.prompt,
     duration: config.duration,
+    resolution: config.resolution,
     metadata,
   };
 
   logger(`[videoRequest] 提交视频任务，模型: ${model.modelName}`);
-  const response = await fetch(`${baseUrl}/video/generations`, {
+  const response = await fetch(`${baseUrl}/video/generateVideo`, {
     method: "POST",
     headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
     body: JSON.stringify(publicBody),
@@ -461,28 +644,32 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
     throw new Error(`请求失败，状态码: ${response.status}, 错误信息: ${errorText}`);
   }
   const data = await response.json();
-  const taskId = data.id;
+  const taskId = data.data;
   logger(`[videoRequest] 任务ID: ${taskId}`);
 
   const res = await pollTask(async () => {
-    const queryResponse = await fetch(`${baseUrl}/video/generations/${taskId}`, {
-      method: "GET",
+    const queryResponse = await fetch(`${baseUrl}/video/getVideoStatus`, {
+      method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        taskICode: taskId,
+      }),
     });
     if (!queryResponse.ok) {
       const errorText = await queryResponse.text();
       throw new Error(`轮询失败，状态码: ${queryResponse.status}, 错误信息: ${errorText}`);
     }
     const queryData = await queryResponse.json();
+    logger(queryData);
     const status = queryData?.status ?? queryData?.data?.status;
     switch (status) {
       case "completed":
       case "SUCCESS":
       case "success":
-        return { completed: true, data: queryData.data.result_url };
+        return { completed: true, data: queryData.data.data };
       case "FAILURE":
       case "failed":
-        return { completed: true, error: queryData?.data?.fail_reason ?? "视频生成失败" };
+        return { completed: true, error: queryData?.data?.failReason ?? "视频生成失败" };
       default:
         return { completed: false };
     }
@@ -497,11 +684,43 @@ const ttsRequest = async (config: TTSConfig, model: TTSModel): Promise<string> =
 };
 
 const checkForUpdates = async (): Promise<{ hasUpdate: boolean; latestVersion: string; notice: string }> => {
-  return { hasUpdate: false, latestVersion: "2.0", notice: "" };
+  const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
+  const baseUrl = vendor.inputValues.baseUrl;
+  const res = await fetch(`${baseUrl}/vendor/vendorCheck`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      version: vendor.version,
+    }),
+  });
+  if (!res.ok) {
+    const errorReason = await res.text();
+    throw new Error(`检查更新失败，${errorReason}`);
+  }
+  const { data } = await res.json();
+  if (data?.hasUpdate && data?.latestVersion) {
+    return {
+      hasUpdate: data?.hasUpdate ?? false,
+      latestVersion: data?.latestVersion ?? null,
+      notice: data?.notice ? data?.notice : "作者有点懒，没有填写更新内容",
+    };
+  }
+  return { hasUpdate: false, latestVersion: "", notice: "" };
 };
 
 const updateVendor = async (): Promise<string> => {
-  return "";
+  const apiKey = vendor.inputValues.apiKey.replace(/^Bearer\s+/i, "");
+  const baseUrl = vendor.inputValues.baseUrl;
+  const response = await fetch(`${baseUrl}/vendor/downloadVendor`, {
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    const errorReason = await response.text();
+    throw new Error(`请求失败: ${response.status} ${errorReason}`);
+  }
+  const { data } = await response.json();
+  logger(data);
+  return data;
 };
 
 // ============================================================

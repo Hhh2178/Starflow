@@ -407,7 +407,6 @@ async function consumeFullStream(
 
   try {
     for await (const chunk of fullStream) {
-      await new Promise<void>((resolve) => setTimeout(() => resolve(), 1));
       if (syncMsg) {
         const newMsg = syncMsg();
         if (newMsg !== msg) {

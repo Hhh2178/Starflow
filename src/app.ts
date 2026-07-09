@@ -194,4 +194,4 @@ export function closeServe(): Promise<void> {
 }
 
 const isElectron = typeof process.versions?.electron !== "undefined";
-if (!isElectron) startServe();
+if (!isElectron && process.env.TOONFLOW_NO_AUTOSTART !== "1") startServe();

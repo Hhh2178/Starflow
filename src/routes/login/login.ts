@@ -4,6 +4,8 @@ import jwt from "jsonwebtoken";
 import { success, error } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { z } from "zod";
+import { normalizeRole } from "@/types/auth";
+import { hashPassword, verifyPassword } from "@/utils/password";
 const router = express.Router();
 
 export function setToken(payload: string | object, expiresIn: string | number, secret: string): string {
@@ -26,19 +28,50 @@ export default router.post(
     const data = await u.db("o_user").where("name", "=", username).first();
     if (!data) return res.status(400).send(error("登录失败"));
 
-    if (data!.password == password && data!.name == username) {
+    if (data.status && data.status !== "enabled") return res.status(403).send(error("账号已停用，请联系管理员"));
+
+    const passwordMatchesHash = verifyPassword(password, data.passwordHash);
+    const passwordMatchesLegacy = !data.passwordHash && data.password == password;
+
+    if ((passwordMatchesHash || passwordMatchesLegacy) && data!.name == username) {
+      const role = normalizeRole(data.role, Number(data.id) === 1 ? "super_admin" : "creator");
+      if (passwordMatchesLegacy) {
+        await u.db("o_user").where("id", data.id).update({
+          passwordHash: hashPassword(password),
+          role,
+          status: data.status || "enabled",
+          updatedAt: Date.now(),
+        });
+      }
+
       const tokenData = await u.db("o_setting").where("key", "tokenKey").first();
       if (!tokenData) return res.status(400).send(error("未找到tokenKey"));
       const token = setToken(
         {
           id: data!.id,
           name: data!.name,
+          role,
         },
         "180Days",
         tokenData?.value as string,
       );
 
-      return res.status(200).send(success({ token: "Bearer " + token, name: data!.name, id: data!.id }, "登录成功"));
+      await u.db("o_user").where("id", data.id).update({
+        lastLoginAt: Date.now(),
+      });
+
+      return res.status(200).send(
+        success(
+          {
+            token: "Bearer " + token,
+            name: data!.name,
+            id: data!.id,
+            role,
+            mustChangePassword: Boolean(data.mustChangePassword),
+          },
+          "登录成功",
+        ),
+      );
     } else {
       return res.status(400).send(error("用户名或密码错误"));
     }

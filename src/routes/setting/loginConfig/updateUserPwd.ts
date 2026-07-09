@@ -3,6 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { hashPassword } from "@/utils/password";
 const router = express.Router();
 
 export default router.post(
@@ -17,6 +18,8 @@ export default router.post(
     await u.db("o_user").where("id", id).update({
       name,
       password,
+      passwordHash: hashPassword(password),
+      updatedAt: Date.now(),
     });
     res.status(200).send(success("保存设置成功"));
   },

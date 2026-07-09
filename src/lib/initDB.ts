@@ -1,6 +1,7 @@
 import { Knex } from "knex";
 import { v4 as uuid } from "uuid";
 import { getEmbedding } from "@/utils/agent/embedding";
+import { hashPassword } from "@/utils/password";
 
 interface TableSchema {
   name: string;
@@ -17,11 +18,31 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.integer("id").notNullable();
         table.text("name");
         table.text("password");
+        table.text("passwordHash");
+        table.text("role").notNullable().defaultTo("creator");
+        table.text("status").notNullable().defaultTo("enabled");
+        table.integer("createdAt");
+        table.integer("updatedAt");
+        table.integer("lastLoginAt");
+        table.boolean("mustChangePassword").defaultTo(false);
         table.primary(["id"]);
         table.unique(["id"]);
       },
       initData: async (knex) => {
-        await knex("o_user").insert([{ id: 1, name: "admin", password: "admin123" }]);
+        const now = Date.now();
+        await knex("o_user").insert([
+          {
+            id: 1,
+            name: "admin",
+            password: "admin123",
+            passwordHash: hashPassword("admin123"),
+            role: "super_admin",
+            status: "enabled",
+            createdAt: now,
+            updatedAt: now,
+            mustChangePassword: true,
+          },
+        ]);
       },
     },
     //项目表

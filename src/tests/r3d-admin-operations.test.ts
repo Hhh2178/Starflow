@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import knex, { type Knex } from "knex";
@@ -16,6 +17,7 @@ import {
   type AuditListInput,
 } from "@/services/auditLog";
 import { createAdjustQuotaRouter } from "@/routes/admin/quota/adjustQuota";
+import { createGetOverviewRouter } from "@/routes/admin/quota/getOverview";
 import { createListAuditRouter } from "@/routes/admin/audit/listAudit";
 import type { AuthUser } from "@/types/auth";
 
@@ -24,6 +26,8 @@ const actors = {
   adminA: { id: 2, name: "admin-a", role: "admin", groupId: 101 },
   creatorA: { id: 3, name: "creator-a", role: "creator", groupId: 101 },
   adminB: { id: 4, name: "admin-b", role: "admin", groupId: 102 },
+  creatorB: { id: 5, name: "creator-b", role: "creator", groupId: 102 },
+  adminA2: { id: 6, name: "admin-a-2", role: "admin", groupId: 101 },
 } satisfies Record<string, AuthUser>;
 
 async function expectServiceError(
@@ -96,11 +100,21 @@ async function testQuotaOverviewScopeAndAggregation(db: Knex): Promise<void> {
     totalRecharge: 100,
     totalUsage: 15,
   });
+  assert.deepEqual(superOverview.summary, {
+    balance: 341,
+    totalRecharge: 140,
+    totalUsage: 20,
+  });
   assert.equal(superOverview.logs.length, 200);
   assert.equal(superOverview.logs.some((item) => item.createdAt === 1), false);
 
   const adminOverview = await getQuotaOverview(actors.adminA, db);
   assert.deepEqual(adminOverview.groups.map((item) => item.groupId), [101]);
+  assert.deepEqual(adminOverview.summary, {
+    balance: 306,
+    totalRecharge: 100,
+    totalUsage: 15,
+  });
   assert.equal(adminOverview.logs.every((item) => item.groupId === 101), true);
   assert.equal(adminOverview.logs.find((item) => item.createdAt === 1_000)?.actorUserId, null);
   const visibleAdminLog = adminOverview.logs.find((item) => item.actorUserId === actors.adminA.id);
@@ -226,14 +240,38 @@ async function seedAuditRows(db: Knex): Promise<void> {
       requestId: null,
       createdAt: 30,
     },
+    {
+      actorUserId: 2,
+      actorRole: "admin",
+      groupId: 101,
+      action: "user.update",
+      targetType: "user",
+      targetId: "6",
+      summaryJson: JSON.stringify({ name: "admin-a-2" }),
+      result: "success",
+      requestId: "request-admin-target",
+      createdAt: 21,
+    },
+    {
+      actorUserId: 2,
+      actorRole: "admin",
+      groupId: 101,
+      action: "user.update",
+      targetType: "user",
+      targetId: "1",
+      summaryJson: JSON.stringify({ name: "root" }),
+      result: "success",
+      requestId: "request-super-target",
+      createdAt: 22,
+    },
   ]);
 }
 
 async function testAuditScopeAndRedaction(db: Knex): Promise<void> {
   await seedAuditRows(db);
   const superList = await listAudit(actors.superAdmin, { page: 1, pageSize: 100 }, db);
-  assert.equal(superList.total, 3);
-  assert.deepEqual(superList.items.map((item: any) => item.groupId), [102, 101, 101]);
+  assert.equal(superList.total, 5);
+  assert.deepEqual(superList.items.map((item: any) => item.groupId), [102, 101, 101, 101, 101]);
   const quotaAudit = superList.items.find((item: any) => item.action === "quota.adjust")!;
   assert.equal(quotaAudit.actionLabel, "额度调整");
   assert.equal(quotaAudit.actorRoleLabel, "超级管理员");
@@ -249,6 +287,7 @@ async function testAuditScopeAndRedaction(db: Knex): Promise<void> {
   assert.equal(adminList.total, 1);
   assert.equal(adminList.items.every((item: any) => item.groupId === 101), true);
   assert.equal(adminList.items.every((item: any) => item.actorRole !== "super_admin"), true);
+  assert.deepEqual(adminList.items.map((item: any) => item.targetId), ["3"]);
   const serialized = JSON.stringify(adminList);
   for (const forbidden of ["summaryJson", "secret-password", "secret-token", "password", "apiKey", "token"]) {
     assert.equal(serialized.includes(forbidden), false, `${forbidden} must be redacted`);
@@ -287,6 +326,10 @@ async function testAdminRoutes(db: Knex): Promise<void> {
     createAdjustQuotaRouter((actor, input) => adjustQuota(actor, input, db)),
   );
   app.use(
+    "/api/admin/quota/getOverview",
+    createGetOverviewRouter((actor) => getQuotaOverview(actor, db)),
+  );
+  app.use(
     "/api/admin/audit/listAudit",
     createListAuditRouter((actor, input) => listAudit(actor, input, db)),
   );
@@ -295,6 +338,7 @@ async function testAdminRoutes(db: Knex): Promise<void> {
   try {
     const { port } = server.address() as AddressInfo;
     const quotaUrl = `http://127.0.0.1:${port}/api/admin/quota/adjustQuota`;
+    const overviewUrl = `http://127.0.0.1:${port}/api/admin/quota/getOverview`;
     const auditUrl = `http://127.0.0.1:${port}/api/admin/audit/listAudit`;
     const validAdjustment = {
       groupId: 101,
@@ -342,6 +386,24 @@ async function testAdminRoutes(db: Knex): Promise<void> {
     assert.equal(adjusted.body.message, "额度调整成功");
     assert.equal(adjusted.body.data.ledger.amount, 5);
 
+    const superOverview = await requestJson(overviewUrl);
+    assert.equal(superOverview.status, 200);
+    assert.deepEqual(superOverview.body.data.groups.map((item: any) => item.groupId), [101, 102]);
+    assert.deepEqual(
+      superOverview.body.data.summary,
+      (await getQuotaOverview(actors.superAdmin, db)).summary,
+    );
+    const adminOverview = await requestJson(overviewUrl, { headers: { "x-test-actor": "adminA" } });
+    assert.equal(adminOverview.status, 200);
+    assert.deepEqual(adminOverview.body.data.groups.map((item: any) => item.groupId), [101]);
+    assert.deepEqual(
+      adminOverview.body.data.summary,
+      (await getQuotaOverview(actors.adminA, db)).summary,
+    );
+    const creatorOverview = await requestJson(overviewUrl, { headers: { "x-test-actor": "creatorA" } });
+    assert.equal(creatorOverview.status, 403);
+    assert.equal(creatorOverview.body.data.code, "ADMIN_REQUIRED");
+
     const adminAudit = await requestJson(`${auditUrl}?page=1&pageSize=20&groupId=102`, {
       headers: { "x-test-actor": "adminA" },
     });
@@ -361,6 +423,30 @@ async function testAdminRoutes(db: Knex): Promise<void> {
   }
 }
 
+async function testGeneratedOverviewRouteAssembly(): Promise<void> {
+  const routerSource = await readFile("src/router.ts", "utf8");
+  assert.match(routerSource, /from "\.\/routes\/admin\/quota\/getOverview"/);
+  assert.match(routerSource, /app\.use\("\/api\/admin\/quota\/getOverview", route\d+\)/);
+
+  const { default: registerRoutes } = await import("@/router");
+  const app = express();
+  app.use((req, _res, next) => {
+    (req as any).user = actors.creatorA;
+    next();
+  });
+  await registerRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await requestJson(`http://127.0.0.1:${port}/api/admin/quota/getOverview`);
+    assert.equal(response.status, 403);
+    assert.equal(response.body.data.code, "ADMIN_REQUIRED");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 async function main(): Promise<void> {
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
@@ -375,12 +461,15 @@ async function main(): Promise<void> {
       { ...actors.adminA, status: "enabled" },
       { ...actors.creatorA, status: "enabled" },
       { ...actors.adminB, status: "enabled" },
+      { ...actors.creatorB, status: "enabled" },
+      { ...actors.adminA2, status: "enabled" },
     ]);
     await migrateGenerationQueue(db);
     await testQuotaOverviewScopeAndAggregation(db);
     await testQuotaAdjustmentsAndRollback(db);
     await testAuditScopeAndRedaction(db);
     await testAdminRoutes(db);
+    await testGeneratedOverviewRouteAssembly();
   } finally {
     await db.destroy();
   }

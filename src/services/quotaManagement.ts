@@ -106,14 +106,23 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
       usage: Number(row.totalUsage ?? 0),
     });
   }
+  const groupDtos = groups.map((group: any) => ({
+    groupId: Number(group.id),
+    groupName: String(group.name),
+    balance: Number(group.balance ?? 0),
+    totalRecharge: totals.get(Number(group.id))?.recharge ?? 0,
+    totalUsage: totals.get(Number(group.id))?.usage ?? 0,
+  }));
   return {
-    groups: groups.map((group: any) => ({
-      groupId: Number(group.id),
-      groupName: String(group.name),
-      balance: Number(group.balance ?? 0),
-      totalRecharge: totals.get(Number(group.id))?.recharge ?? 0,
-      totalUsage: totals.get(Number(group.id))?.usage ?? 0,
-    })),
+    summary: groupDtos.reduce(
+      (summary, group) => ({
+        balance: summary.balance + group.balance,
+        totalRecharge: summary.totalRecharge + group.totalRecharge,
+        totalUsage: summary.totalUsage + group.totalUsage,
+      }),
+      { balance: 0, totalRecharge: 0, totalUsage: 0 },
+    ),
+    groups: groupDtos,
     logs: ledgers.map((ledger: any) => toLedgerDto(
       ledger,
       actor.role === "admin" && ledger.actorRole === "super_admin",

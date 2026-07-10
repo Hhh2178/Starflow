@@ -134,31 +134,42 @@ export async function listAudit(
     throw new AuditLogError(422, "GROUP_ID_INVALID", "分组 ID 必须是正整数");
   }
 
+  const createQuery = () => connection("o_auditLog")
+    .leftJoin("o_user as targetUser", "targetUser.id", "o_auditLog.targetId");
   const applyScope = (query: Knex.QueryBuilder) => {
     if (actor.role === "admin") {
-      return query.where("groupId", actor.groupId).whereNot("actorRole", "super_admin");
+      return query
+        .where("o_auditLog.groupId", actor.groupId)
+        .whereNot("o_auditLog.actorRole", "super_admin")
+        .andWhere(function () {
+          this.whereNot("o_auditLog.targetType", "user")
+            .orWhereNull("targetUser.role")
+            .orWhereNotIn("targetUser.role", ["admin", "super_admin"]);
+        });
     }
-    return input.groupId === undefined ? query : query.where("groupId", input.groupId);
+    return input.groupId === undefined
+      ? query
+      : query.where("o_auditLog.groupId", input.groupId);
   };
-  const countRow = await applyScope(connection("o_auditLog"))
-    .count({ count: "id" })
+  const countRow = await applyScope(createQuery())
+    .count({ count: "o_auditLog.id" })
     .first();
-  const rows = await applyScope(connection("o_auditLog"))
+  const rows = await applyScope(createQuery())
     .select(
-      "id",
-      "actorUserId",
-      "actorRole",
-      "groupId",
-      "action",
-      "targetType",
-      "targetId",
-      "summaryJson",
-      "result",
-      "requestId",
-      "createdAt",
+      "o_auditLog.id",
+      "o_auditLog.actorUserId",
+      "o_auditLog.actorRole",
+      "o_auditLog.groupId",
+      "o_auditLog.action",
+      "o_auditLog.targetType",
+      "o_auditLog.targetId",
+      "o_auditLog.summaryJson",
+      "o_auditLog.result",
+      "o_auditLog.requestId",
+      "o_auditLog.createdAt",
     )
-    .orderBy("createdAt", "desc")
-    .orderBy("id", "desc")
+    .orderBy("o_auditLog.createdAt", "desc")
+    .orderBy("o_auditLog.id", "desc")
     .limit(pageSize)
     .offset((page - 1) * pageSize);
   return {

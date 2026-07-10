@@ -24,7 +24,8 @@ import {
 import { chooseFairCandidate, claimNextJob } from "@/services/generationScheduler";
 import { executeClaimedJob, recoverExpiredJobs } from "@/services/generationScheduler";
 import { createGenerationJobRegistry } from "@/jobs/registry";
-import type { GenerationJobHandler } from "@/types/generationQueue";
+import { coreGenerationRegistry, createCoreGenerationRegistry } from "@/jobs/coreRegistry";
+import type { GenerationExecutionContext, GenerationJobHandler } from "@/types/generationQueue";
 import { createTextGenerationHandler, textGenerationPayloadSchema } from "@/jobs/handlers/textGeneration";
 import { executeCoreTextGeneration } from "@/jobs/handlers/coreTextExecutor";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
@@ -279,6 +280,46 @@ async function testTrustedHandlerContracts(): Promise<void> {
   assert.deepEqual(calls, ["novel_events", "asset", "track"]);
 }
 
+async function testCoreRegistryForwardsExecutionContext(): Promise<void> {
+  let receivedContext: GenerationExecutionContext | undefined;
+  const registry = createCoreGenerationRegistry({
+    text: async (_payload, context) => {
+      receivedContext = context;
+      return {
+        result: {},
+        metering: {
+          providerId: null,
+          modelId: "universalAi",
+          units: {},
+          estimatedCost: null,
+          currency: null,
+          pricingSnapshot: {},
+          providerRequestId: null,
+        },
+      };
+    },
+  });
+  const context: GenerationExecutionContext = {
+    jobId: 71,
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    signal: new AbortController().signal,
+    heartbeat: async () => undefined,
+    setProviderRequestId: async () => undefined,
+  };
+  const handler = registry.get("core.text")!;
+  const payload = handler.parsePayload({
+    operation: "novel_events",
+    projectId: 1001,
+    targetId: 501,
+    model: "universalAi",
+    prompt: "",
+  });
+  await handler.execute(context, payload);
+  assert.equal(receivedContext, context);
+}
+
 async function expectPolicyError(
   operation: Promise<unknown>,
   status: number,
@@ -474,6 +515,7 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
     { id: 902, projectId: 1001, scriptId: 801, state: "未生成" },
     { id: 903, projectId: 1103, scriptId: 803, state: "未生成" },
     { id: 904, projectId: 1001, scriptId: 801, state: "未生成", reason: "old error" },
+    { id: 905, projectId: 1001, scriptId: 801, state: "未生成" },
   ]);
   const promptInput = {
     projectId: 1001,
@@ -482,13 +524,16 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
     tracks: [
       { trackId: 901, references: [{ kind: "asset" as const, id: 601 }] },
       { trackId: 902, references: [{ kind: "storyboard" as const, id: 701 }] },
+      { trackId: 905, references: [] },
     ],
   };
   const promptJobs = await enqueueVideoPromptJobs(creatorA, promptInput, "request-prompt-1", db);
+  await db("o_videoTrack").whereIn("id", [901, 902, 905]).update({ state: "未生成", reason: "stale state" });
   const duplicatePromptJobs = await enqueueVideoPromptJobs(creatorA, promptInput, "request-prompt-1", db);
   assert.deepEqual(promptJobs.map(({ targetId, status }) => ({ targetId, status })), [
     { targetId: 901, status: "queued" },
     { targetId: 902, status: "queued" },
+    { targetId: 905, status: "queued" },
   ]);
   assert.deepEqual(duplicatePromptJobs.map((item) => item.jobId), promptJobs.map((item) => item.jobId));
   const promptJobRows = await db("o_generationJob")
@@ -498,6 +543,7 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   assert.deepEqual(promptJobRows.map((row) => row.idempotencyKey), [
     "video-prompt:request-prompt-1:901",
     "video-prompt:request-prompt-1:902",
+    "video-prompt:request-prompt-1:905",
   ]);
   assert.equal(promptJobRows.every((row) => row.handlerKey === "core.text" && row.taskType === "text"), true);
   const promptPayloads = promptJobRows.map((row) => textGenerationPayloadSchema.parse(JSON.parse(row.payloadJson)));
@@ -522,13 +568,46 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
       mode: "multi-reference",
       references: [{ kind: "storyboard", id: 701 }],
     },
+    {
+      operation: "video_prompt",
+      projectId: 1001,
+      targetId: 905,
+      model: "universalAi",
+      prompt: "",
+      videoModel: "vendor:seedance-2.0",
+      mode: "multi-reference",
+      references: [],
+    },
   ]);
   assert.deepEqual(
-    await db("o_videoTrack").whereIn("id", [901, 902]).orderBy("id").select("id", "state", "reason"),
+    await db("o_videoTrack").whereIn("id", [901, 902, 905]).orderBy("id").select("id", "state", "reason"),
     [
       { id: 901, state: "生成中", reason: null },
       { id: 902, state: "生成中", reason: null },
+      { id: 905, state: "生成中", reason: null },
     ],
+  );
+
+  const terminalStatuses = ["succeeded", "failed", "cancelled"] as const;
+  const terminalTrackStates = ["已完成", "生成失败", "已取消"] as const;
+  for (const [index, job] of promptJobs.entries()) {
+    await db("o_generationJob").where({ id: job.jobId }).update({
+      status: terminalStatuses[index],
+      finishedAt: Date.now(),
+    });
+    await db("o_videoTrack").where({ id: job.targetId }).update({
+      state: terminalTrackStates[index],
+      reason: `terminal-${terminalStatuses[index]}`,
+    });
+  }
+  const terminalReplays = await enqueueVideoPromptJobs(creatorA, promptInput, "request-prompt-1", db);
+  assert.deepEqual(terminalReplays.map((item) => item.status), terminalStatuses);
+  assert.deepEqual(
+    await db("o_videoTrack").whereIn("id", [901, 902, 905]).orderBy("id").select("state", "reason"),
+    terminalStatuses.map((status, index) => ({
+      state: terminalTrackStates[index],
+      reason: `terminal-${status}`,
+    })),
   );
   await db("o_generationJob").whereIn("id", promptJobs.map((item) => item.jobId)).del();
 
@@ -789,6 +868,18 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
 
   const readPaths: string[] = [];
   const aiCalls: Array<{ model: string; input: any }> = [];
+  const providerMarkers: string[] = [];
+  const executionContext: GenerationExecutionContext = {
+    jobId: 77,
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    signal: new AbortController().signal,
+    heartbeat: async () => undefined,
+    setProviderRequestId: async (id) => {
+      providerMarkers.push(id);
+    },
+  };
   const result = await executeCoreTextGeneration({
     operation: "video_prompt",
     projectId: 1001,
@@ -801,7 +892,7 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
       { kind: "asset", id: 961 },
       { kind: "storyboard", id: 962 },
     ],
-  }, {
+  }, executionContext, {
     connection: db,
     getPath: () => "C:\\prompt-root",
     readFile: async (filePath) => {
@@ -813,10 +904,12 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
       return "cinematic visual manual";
     },
     invokeText: async (model, input) => {
+      assert.deepEqual(providerMarkers, ["video-prompt:77"]);
       aiCalls.push({ model, input });
       return { text: "generated video prompt" };
     },
   });
+  assert.deepEqual(providerMarkers, ["video-prompt:77"]);
   assert.equal(readPaths.length, 1);
   assert.equal(readPaths[0].endsWith("custom-seedance.md"), true);
   assert.equal(aiCalls[0].model, "universalAi");
@@ -842,6 +935,14 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
   );
 
   const automaticTemplatePaths: string[] = [];
+  const failedProviderMarkers: string[] = [];
+  const failedExecutionContext: GenerationExecutionContext = {
+    ...executionContext,
+    jobId: 78,
+    setProviderRequestId: async (id) => {
+      failedProviderMarkers.push(id);
+    },
+  };
   await assert.rejects(
     executeCoreTextGeneration({
       operation: "video_prompt",
@@ -852,7 +953,7 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
       videoModel: "vendor:wan-2.6",
       mode: "startFrameOptional",
       references: [],
-    }, {
+    }, failedExecutionContext, {
       connection: db,
       getPath: () => "C:\\prompt-root",
       readFile: async (filePath) => {
@@ -861,11 +962,13 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
       },
       getArtPrompt: () => "cinematic visual manual",
       invokeText: async () => {
+        assert.deepEqual(failedProviderMarkers, ["video-prompt:78"]);
         throw new Error("provider unavailable");
       },
     }),
     /provider unavailable/,
   );
+  assert.deepEqual(failedProviderMarkers, ["video-prompt:78"]);
   assert.equal(automaticTemplatePaths.some((filePath) => filePath.endsWith("wan2.6Single-imageFirstFrameMode.md")), true);
   assert.deepEqual(
     await db("o_videoTrack").where({ id: 964 }).select("state", "reason").first(),
@@ -1166,6 +1269,7 @@ async function testExpiredLeaseRecovery(db: ReturnType<typeof knex>): Promise<vo
   const registry = createGenerationJobRegistry([
     handler("test.idempotent", true),
     handler("test.non-idempotent", false),
+    coreGenerationRegistry.get("core.text")!,
   ]);
   const base = {
     groupId: 101,
@@ -1202,16 +1306,30 @@ async function testExpiredLeaseRecovery(db: ReturnType<typeof knex>): Promise<vo
       providerRequestId: "provider-2",
       leaseExpiresAt: 99,
     },
+    {
+      ...base,
+      handlerKey: "core.text",
+      status: "running",
+      idempotencyKey: "recover-video-prompt-submitted",
+      providerRequestId: "video-prompt:77",
+      leaseExpiresAt: 99,
+    },
   ]);
 
   const result = await recoverExpiredJobs({ connection: db, registry, now: 100 });
-  assert.deepEqual(result, { requeued: 2, needsAttention: 1 });
+  assert.deepEqual(result, { requeued: 2, needsAttention: 2 });
   assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-queued" }).first()).status, "queued");
   assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-before-submit" }).first()).status, "queued");
   assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-idempotent" }).first()).status, "queued");
   const unknown = await db("o_generationJob").where({ idempotencyKey: "recover-unknown" }).first();
   assert.equal(unknown.status, "needs_attention");
   assert.equal(unknown.errorCode, "EXTERNAL_STATE_UNKNOWN");
+  const submittedVideoPrompt = await db("o_generationJob")
+    .where({ idempotencyKey: "recover-video-prompt-submitted" })
+    .first();
+  assert.equal(submittedVideoPrompt.status, "needs_attention");
+  assert.equal(submittedVideoPrompt.providerRequestId, "video-prompt:77");
+  assert.equal(submittedVideoPrompt.errorCode, "EXTERNAL_STATE_UNKNOWN");
 }
 
 async function testWorkerLifecycle(db: ReturnType<typeof knex>): Promise<void> {
@@ -1338,6 +1456,7 @@ async function main(): Promise<void> {
   testFairSelection();
   testTextGenerationPayloadContract();
   await testTrustedHandlerContracts();
+  await testCoreRegistryForwardsExecutionContext();
   await testVideoPromptRouteHandlers();
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {

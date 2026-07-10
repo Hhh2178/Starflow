@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { v4 as uuidv4 } from "uuid";
 import type { AuthUser } from "@/types/auth";
+import type { GenerationJobStatus } from "@/types/generationQueue";
 import { enqueueGeneration, GenerationQueueError } from "@/services/generationQueue";
 
 type WorkflowConnection = Knex | Knex.Transaction;
@@ -8,7 +9,7 @@ type WorkflowConnection = Knex | Knex.Transaction;
 export interface QueuedWorkflowItem {
   jobId: number;
   targetId: number;
-  status: "queued";
+  status: GenerationJobStatus;
 }
 
 export interface EnqueueAssetImageInput {
@@ -372,10 +373,6 @@ export async function enqueueVideoPromptJobs(
         `${reference.kind}:${reference.id}`,
         reference,
       ])).values()];
-      await trx("o_videoTrack").where({ id: track.trackId, projectId: input.projectId }).update({
-        state: "生成中",
-        reason: null,
-      });
       const job = await enqueueGeneration(actor, {
         projectId: input.projectId,
         sourceTaskId: track.trackId,
@@ -393,7 +390,13 @@ export async function enqueueVideoPromptJobs(
         },
         idempotencyKey: `video-prompt:${requestId}:${track.trackId}`,
       }, trx);
-      items.push({ jobId: job.id, targetId: track.trackId, status: "queued" });
+      if (job.status === "queued") {
+        await trx("o_videoTrack").where({ id: track.trackId, projectId: input.projectId }).update({
+          state: "生成中",
+          reason: null,
+        });
+      }
+      items.push({ jobId: job.id, targetId: track.trackId, status: job.status });
     }
     return items;
   });

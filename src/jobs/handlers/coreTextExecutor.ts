@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import type { Knex } from "knex";
 import u from "@/utils";
-import type { GenerationExecutionResult } from "@/types/generationQueue";
+import type { GenerationExecutionContext, GenerationExecutionResult } from "@/types/generationQueue";
 import type { TextGenerationPayload } from "@/jobs/handlers/textGeneration";
 
 type ExecutorConnection = Knex | Knex.Transaction;
@@ -87,6 +87,7 @@ async function executeNovelEvents(
 
 async function executeVideoPrompt(
   payload: Extract<TextGenerationPayload, { operation: "video_prompt" }>,
+  context: GenerationExecutionContext,
   dependencies: Required<CoreTextExecutorDependencies>,
 ): Promise<GenerationExecutionResult<unknown>> {
   const { connection, getPath, readFile, getArtPrompt, invokeText } = dependencies;
@@ -186,6 +187,7 @@ async function executeVideoPrompt(
 **资产信息**（角色、场景、道具、音频):${assetContent},
 **分镜信息**：${storyboardContent}
 `;
+    await context.setProviderRequestId(`video-prompt:${context.jobId}`);
     const { text } = await invokeText("universalAi", {
       system: systemPrompt,
       messages: [
@@ -215,6 +217,7 @@ async function executeVideoPrompt(
 
 export async function executeCoreTextGeneration(
   payload: TextGenerationPayload,
+  context: GenerationExecutionContext,
   overrides: CoreTextExecutorDependencies = {},
 ): Promise<GenerationExecutionResult<unknown>> {
   const dependencies: Required<CoreTextExecutorDependencies> = {
@@ -226,6 +229,6 @@ export async function executeCoreTextGeneration(
   };
 
   if (payload.operation === "novel_events") return executeNovelEvents(payload, dependencies.connection);
-  if (payload.operation === "video_prompt") return executeVideoPrompt(payload, dependencies);
+  if (payload.operation === "video_prompt") return executeVideoPrompt(payload, context, dependencies);
   throw new Error(`尚未接入的文本任务类型: ${payload.operation}`);
 }

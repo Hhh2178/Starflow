@@ -1,13 +1,29 @@
 import { createGenerationJobRegistry } from "@/jobs/registry";
-import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
+import { createTextGenerationHandler, type TextGenerationPayload } from "@/jobs/handlers/textGeneration";
 import { executeCoreTextGeneration } from "@/jobs/handlers/coreTextExecutor";
-import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
+import { createImageGenerationHandler, type ImageGenerationPayload } from "@/jobs/handlers/imageGeneration";
 import { executeCoreImageGeneration } from "@/jobs/handlers/coreImageExecutor";
-import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
+import { createVideoGenerationHandler, type VideoGenerationPayload } from "@/jobs/handlers/videoGeneration";
 import { executeCoreVideoGeneration } from "@/jobs/handlers/coreVideoExecutor";
+import type { GenerationExecutionContext, GenerationExecutionResult } from "@/types/generationQueue";
 
-export const coreGenerationRegistry = createGenerationJobRegistry([
-  createTextGenerationHandler((payload) => executeCoreTextGeneration(payload)),
-  createImageGenerationHandler(executeCoreImageGeneration),
-  createVideoGenerationHandler(executeCoreVideoGeneration),
-]);
+type CoreExecutor<TPayload> = (
+  payload: TPayload,
+  context: GenerationExecutionContext,
+) => Promise<GenerationExecutionResult<unknown>>;
+
+export interface CoreGenerationExecutors {
+  text: CoreExecutor<TextGenerationPayload>;
+  image: CoreExecutor<ImageGenerationPayload>;
+  video: CoreExecutor<VideoGenerationPayload>;
+}
+
+export function createCoreGenerationRegistry(overrides: Partial<CoreGenerationExecutors> = {}) {
+  return createGenerationJobRegistry([
+    createTextGenerationHandler(overrides.text ?? executeCoreTextGeneration),
+    createImageGenerationHandler(overrides.image ?? executeCoreImageGeneration),
+    createVideoGenerationHandler(overrides.video ?? executeCoreVideoGeneration),
+  ]);
+}
+
+export const coreGenerationRegistry = createCoreGenerationRegistry();

@@ -1,8 +1,10 @@
 import express from "express";
 import u from "@/utils";
 import { z } from "zod";
-import { success } from "@/lib/responseFormat";
+import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { getAuthUser } from "@/middleware/auth";
+import { requireProjectAccess } from "@/middleware/projectAccess";
 const router = express.Router();
 
 // 删除项目
@@ -11,8 +13,12 @@ export default router.post(
   validateFields({
     id: z.number(),
   }),
+  requireProjectAccess("id"),
   async (req, res) => {
     const { id } = req.body;
+    if (getAuthUser(req).role !== "super_admin") {
+      return res.status(403).send(error("仅超级管理员可永久删除项目"));
+    }
     //删除项目
     await u.db("o_project").where("id", id).delete();
     await u.db("o_agentWorkData").where("projectId", id).delete();

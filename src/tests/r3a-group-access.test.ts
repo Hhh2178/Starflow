@@ -265,6 +265,23 @@ async function login(baseUrl: string, username: string, password: string): Promi
   return result.body.data.token;
 }
 
+function projectInput(name: string, groupId?: number): Record<string, unknown> {
+  return {
+    projectType: "series",
+    name,
+    intro: "R3A 项目隔离测试",
+    type: "short-drama",
+    artStyle: "cinematic",
+    directorManual: "",
+    videoRatio: "16:9",
+    imageModel: "test-image",
+    videoModel: "test-video",
+    imageQuality: "standard",
+    mode: "standard",
+    ...(groupId === undefined ? {} : { groupId }),
+  };
+}
+
 async function testAdminSession(): Promise<void> {
   const [{ default: startServe, closeServe }, { default: u }] = await Promise.all([import("@/app"), import("@/utils")]);
   const suffix = `${Date.now().toString(36)}${Math.random().toString(16).slice(2, 6)}`;
@@ -275,12 +292,14 @@ async function testAdminSession(): Promise<void> {
   const creatorBName = `r3a-creator-b-${suffix}`;
   const createdCreatorNames = Array.from({ length: 5 }, (_, index) => `r3a-created-${index}-${suffix}`);
   const forbiddenAdminName = `r3a-forbidden-${suffix}`;
+  const projectNames = [`r3a-project-a-${suffix}`, `r3a-project-b-${suffix}`, `r3a-project-c-${suffix}`];
   const password = "TempPass123";
   const now = Date.now();
   let baseUrl = "";
   let groupId: number | null = null;
   let groupBId: number | null = null;
   let userIds: number[] = [];
+  let projectIds: number[] = [];
 
   try {
     const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
@@ -401,6 +420,59 @@ async function testAdminSession(): Promise<void> {
     assert.ok(adminUsers.body.data.every((user: any) => user.role === "creator" && user.groupId === groupId));
     assert.equal(adminUsers.body.data.some((user: any) => user.id === userIds[3] || user.id === userIds[4]), false);
 
+    const creatorSameGroupToken = await login(baseUrl, createdCreatorNames[0], password);
+    const creatorOtherGroupToken = await login(baseUrl, creatorBName, password);
+    const adminOtherGroupToken = await login(baseUrl, adminBName, password);
+    for (const [token, name] of [
+      [creatorToken, projectNames[0]],
+      [creatorSameGroupToken, projectNames[1]],
+      [creatorOtherGroupToken, projectNames[2]],
+    ] as const) {
+      const created = await request(baseUrl, "/api/project/addProject", token, {
+        method: "POST",
+        body: JSON.stringify(projectInput(name, groupBId ?? undefined)),
+      });
+      assert.equal(created.status, 200);
+    }
+
+    const projects = await u.db("o_project").whereIn("name", projectNames).select("id", "name", "ownerUserId", "groupId");
+    assert.equal(projects.length, 3);
+    const projectsByName = new Map(projects.map((project: any) => [project.name, project]));
+    const projectA = projectsByName.get(projectNames[0]);
+    const projectB = projectsByName.get(projectNames[1]);
+    const projectC = projectsByName.get(projectNames[2]);
+    assert.ok(projectA && projectB && projectC);
+    projectIds = [Number(projectA.id), Number(projectB.id), Number(projectC.id)];
+    assert.deepEqual([projectA.ownerUserId, projectA.groupId], [userIds[1], groupId]);
+    assert.equal(projectB.groupId, groupId);
+    assert.deepEqual([projectC.ownerUserId, projectC.groupId], [userIds[4], groupBId]);
+
+    const visibleProjectIds = async (token: string): Promise<number[]> => {
+      const result = await request(baseUrl, "/api/project/getProject", token, { method: "POST", body: "{}" });
+      assert.equal(result.status, 200);
+      return result.body.data.map((project: any) => Number(project.id)).filter((id: number) => projectIds.includes(id));
+    };
+    assert.deepEqual(await visibleProjectIds(creatorToken), [projectIds[0]]);
+    assert.deepEqual(await visibleProjectIds(creatorSameGroupToken), [projectIds[1]]);
+    assert.deepEqual((await visibleProjectIds(adminToken)).sort(), [projectIds[0], projectIds[1]].sort());
+    assert.deepEqual(await visibleProjectIds(adminOtherGroupToken), [projectIds[2]]);
+
+    const crossGroupEdit = await request(baseUrl, "/api/project/editProject", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ ...projectInput("不可见项目"), id: projectIds[2] }),
+    });
+    assert.equal(crossGroupEdit.status, 404);
+    const crossOwnerDelete = await request(baseUrl, "/api/project/delProject", creatorSameGroupToken, {
+      method: "POST",
+      body: JSON.stringify({ id: projectIds[0] }),
+    });
+    assert.equal(crossOwnerDelete.status, 404);
+    const creatorPermanentDelete = await request(baseUrl, "/api/project/delProject", creatorToken, {
+      method: "POST",
+      body: JSON.stringify({ id: projectIds[0] }),
+    });
+    assert.equal(creatorPermanentDelete.status, 403);
+
     const crossGroupUpdate = await request(baseUrl, "/api/admin/users/updateUser", adminToken, {
       method: "POST",
       body: JSON.stringify({ id: userIds[4], status: "disabled" }),
@@ -455,6 +527,7 @@ async function testAdminSession(): Promise<void> {
     assert.ok(allGroups.body.data.some((group: any) => group.id === groupBId));
   } finally {
     if (baseUrl) await closeServe();
+    if (projectIds.length) await u.db("o_project").whereIn("id", projectIds).delete();
     await u.db("o_user").whereIn("name", [...createdCreatorNames, forbiddenAdminName]).delete();
     if (userIds.length) await u.db("o_user").whereIn("id", userIds).delete();
     if (groupId !== null) await u.db("o_group").where("id", groupId).delete();

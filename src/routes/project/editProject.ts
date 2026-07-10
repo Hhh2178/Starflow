@@ -3,6 +3,7 @@ import u from "@/utils";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
+import { requireProjectAccess } from "@/middleware/projectAccess";
 const router = express.Router();
 
 // 新增项目
@@ -22,6 +23,7 @@ export default router.post(
     imageQuality: z.string(),
     mode: z.string(),
   }),
+  requireProjectAccess("id"),
   async (req, res) => {
     const { id, name, intro, type, artStyle, videoRatio, directorManual, imageModel, videoModel, imageQuality, projectType, mode } = req.body;
 

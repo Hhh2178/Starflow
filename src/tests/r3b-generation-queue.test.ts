@@ -23,6 +23,7 @@ import type { GenerationJobHandler } from "@/types/generationQueue";
 import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
+import { enqueueNovelEventJobs } from "@/services/generationWorkflows";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -236,6 +237,10 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
     groupId: 101,
     createTime: Date.now(),
   });
+  await db("o_novel").insert([
+    { id: 501, projectId: 1001, chapterIndex: 1, chapterData: "chapter secret 1", eventState: -1 },
+    { id: 502, projectId: 1001, chapterIndex: 2, chapterData: "chapter secret 2", eventState: -1 },
+  ]);
   await db("o_project").insert({
     id: 1002,
     name: "other-project",
@@ -252,6 +257,38 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   await db("o_concurrencyPolicy")
     .where({ scopeType: "user", scopeId: 3 })
     .update({ totalLimit: 1, textLimit: 1, imageLimit: 1, videoLimit: 1 });
+
+  const workflowJobs = await enqueueNovelEventJobs(creatorA, 1001, [501, 502], "request-1", db);
+  assert.deepEqual(workflowJobs.map((item) => ({ targetId: item.targetId, status: item.status })), [
+    { targetId: 501, status: "queued" },
+    { targetId: 502, status: "queued" },
+  ]);
+  const workflowPayloads = await db("o_generationJob").whereIn("id", workflowJobs.map((item) => item.jobId)).select("payloadJson");
+  assert.equal(workflowPayloads.every((row) => !row.payloadJson.includes("chapter secret")), true);
+  assert.equal(Number((await db("o_novel").where({ eventState: 0 }).count({ count: "id" }).first())?.count), 2);
+  await db("o_generationJob").whereIn("id", workflowJobs.map((item) => item.jobId)).del();
+
+  for (const payload of [
+    { providerKey: "secret" },
+    { imageBase64: "AAAA" },
+    { executableCode: "return process.env" },
+  ]) {
+    await assert.rejects(
+      enqueueGeneration(
+        creatorA,
+        {
+          projectId: 1001,
+          handlerKey: "test.text",
+          taskType: "text",
+          payload,
+          idempotencyKey: `unsafe-${Object.keys(payload)[0]}`,
+        },
+        db,
+      ),
+      (error: unknown) => error instanceof GenerationQueueError && error.code === "UNSAFE_PAYLOAD",
+    );
+  }
+  assert.equal(Number((await db("o_generationJob").count({ count: "id" }).first())?.count), 0);
 
   await assert.rejects(
     enqueueGeneration(

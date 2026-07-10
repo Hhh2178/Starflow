@@ -34,7 +34,7 @@ const db = knex({
   useNullAsDefault: true,
 });
 
-(async () => {
+export const dbReady = (async () => {
   await initDB(db);
   await fixDB(db);
   if (process.env.NODE_ENV == "dev") initKnexType(db);

@@ -66,6 +66,30 @@ function canAccessProject(actor: AuthUser, project: any): boolean {
   return Number(project.ownerUserId) === actor.id;
 }
 
+const forbiddenPayloadKey = /^(apiKey|providerKey|accessToken|refreshToken|secret|password|base64|imageBase64|videoBase64|audioBase64|code|sourceCode|executableCode|functionBody)$/i;
+
+function assertSafePayload(value: unknown, path: string = "payload"): void {
+  if (value == null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "string" && /^data:[^;]+;base64,/i.test(value)) {
+      throw new GenerationQueueError(422, "UNSAFE_PAYLOAD", `${path} 不能包含 Base64 媒体`);
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => assertSafePayload(item, `${path}[${index}]`));
+    return;
+  }
+  if (typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new GenerationQueueError(422, "UNSAFE_PAYLOAD", `${path} 包含不支持的数据类型`);
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (forbiddenPayloadKey.test(key)) {
+      throw new GenerationQueueError(422, "UNSAFE_PAYLOAD", `${path}.${key} 不允许持久化`);
+    }
+    assertSafePayload(item, `${path}.${key}`);
+  }
+}
+
 function applyJobScope(query: Knex.QueryBuilder, actor: AuthUser): Knex.QueryBuilder {
   if (actor.role === "super_admin") return query;
   if (actor.role === "admin") return query.where("groupId", actor.groupId);
@@ -90,6 +114,7 @@ export async function enqueueGeneration(
   if (!project || !canAccessProject(actor, project) || project.groupId == null || project.ownerUserId == null) {
     throw new GenerationQueueError(404, "PROJECT_NOT_FOUND", "项目不存在或当前账号无权访问");
   }
+  assertSafePayload(input.payload);
 
   const duplicate = await resolvedConnection("o_generationJob").where({ idempotencyKey: input.idempotencyKey }).first();
   if (duplicate) {

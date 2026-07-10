@@ -16,9 +16,13 @@ import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
 import { requireAuth, requireRole } from "@/middleware/auth";
 import { requireScopedProductionAccess } from "@/middleware/projectAccess";
+import { db, dbReady } from "@/utils/db";
+import { coreGenerationRegistry } from "@/jobs/coreRegistry";
+import { startGenerationScheduler } from "@/services/generationSchedulerRuntime";
 
 const app = express();
 const server = http.createServer(app);
+let stopScheduler: (() => Promise<void>) | null = null;
 
 async function checkPermissions() {
   if (!isEletron()) return true;
@@ -46,6 +50,7 @@ async function checkPermissions() {
 
 export default async function startServe(randomPort: Boolean = false) {
   await checkPermissions();
+  await dbReady;
 
   await u.writeVersion();
   const io = new Server(server, { cors: { origin: "*" } });
@@ -182,6 +187,7 @@ export default async function startServe(randomPort: Boolean = false) {
 
   const router = await import("@/router");
   await router.default(app);
+  stopScheduler = await startGenerationScheduler({ connection: db, registry: coreGenerationRegistry });
 
   // 404 处理
   app.use((_, res, next: NextFunction) => {
@@ -209,7 +215,11 @@ export default async function startServe(randomPort: Boolean = false) {
 
 // 支持await关闭
 export function closeServe(): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise(async (resolve, reject) => {
+    if (stopScheduler) {
+      await stopScheduler();
+      stopScheduler = null;
+    }
     if (server) {
       server.close((err?: Error) => {
         if (err) return reject(err);

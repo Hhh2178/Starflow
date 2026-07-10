@@ -78,9 +78,14 @@ async function assertRequiredSchema(db: Knex): Promise<void> {
     ["o_tasks", "ownerUserId"],
     ["o_tasks", "groupId"],
     ["o_imageFlow", "projectId"],
+    ["o_auditLog", "targetRole"],
   ] as const) {
     assert.equal(await db.schema.hasColumn(table, column), true, `${table}.${column} must exist`);
   }
+  assert.match(
+    fs.readFileSync(path.resolve("src/types/database.d.ts"), "utf8"),
+    /export interface o_auditLog[\s\S]*'targetRole'\?: string \| null;/,
+  );
 }
 
 async function testFreshSchema(): Promise<void> {
@@ -118,6 +123,7 @@ async function testFreshSchema(): Promise<void> {
     assert.equal(audit.groupId, null);
     assert.equal(audit.summaryJson, "{}");
     assert.equal(audit.targetId, null);
+    assert.equal(audit.targetRole, null);
     assert.equal(audit.requestId, null);
   });
 }
@@ -135,6 +141,19 @@ async function createOwnershiplessLegacySchema(db: Knex): Promise<void> {
   await db.schema.createTable("o_tasks", (table) => {
     table.integer("id").primary();
     table.integer("projectId");
+  });
+  await db.schema.createTable("o_auditLog", (table) => {
+    table.increments("id").primary();
+    table.integer("actorUserId").notNullable();
+    table.text("actorRole").notNullable();
+    table.integer("groupId");
+    table.text("action").notNullable();
+    table.text("targetType").notNullable();
+    table.text("targetId");
+    table.text("summaryJson").notNullable().defaultTo("{}");
+    table.text("result").notNullable();
+    table.text("requestId");
+    table.integer("createdAt").notNullable();
   });
 }
 
@@ -154,8 +173,19 @@ async function testLegacySchemaUpgrade(migrate: GroupOwnershipMigration): Promis
       { id: 20, projectId: 10 },
       { id: 21, projectId: 11 },
     ]);
+    const [legacyAuditId] = await db("o_auditLog").insert({
+      actorUserId: 2,
+      actorRole: "admin",
+      action: "user.update",
+      targetType: "user",
+      targetId: "3",
+      result: "success",
+      createdAt: 1,
+    });
 
     await migrate(db);
+
+    assert.equal((await db("o_auditLog").where({ id: legacyAuditId }).first()).targetRole, null);
     await assertRequiredSchema(db);
     await migrate(db);
 

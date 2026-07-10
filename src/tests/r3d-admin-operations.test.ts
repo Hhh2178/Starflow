@@ -14,6 +14,7 @@ import {
 import {
   AuditLogError,
   listAudit,
+  writeAudit,
   type AuditListInput,
 } from "@/services/auditLog";
 import { createAdjustQuotaRouter } from "@/routes/admin/quota/adjustQuota";
@@ -201,6 +202,64 @@ async function testQuotaAdjustmentsAndRollback(db: Knex): Promise<void> {
   assert.equal(Number((await db("o_quotaLedger").count({ count: "id" }).first())?.count), ledgerCountBefore);
 }
 
+async function testQuotaMicroUnitArithmetic(db: Knex): Promise<void> {
+  await resetLedgers(db);
+  const [first, second] = await Promise.all([
+    adjustQuota(
+      actors.superAdmin,
+      { groupId: 101, entryType: "manual_topup", amount: 0.1, reason: "并发充值一" },
+      db,
+    ),
+    adjustQuota(
+      actors.superAdmin,
+      { groupId: 101, entryType: "manual_credit", amount: 0.2, reason: "并发调额二" },
+      db,
+    ),
+  ]);
+  assert.deepEqual([first.ledger.amount, second.ledger.amount].sort(), [0.1, 0.2]);
+  const account = await db("o_quotaAccount").where({ groupId: 101 }).first();
+  assert.equal(Number(account.balance), 0.3);
+  const ledgers = await db("o_quotaLedger").where({ groupId: 101 }).orderBy("id", "asc");
+  assert.equal(ledgers.length, 2);
+  assert.equal(Number(ledgers[0].balanceBefore), 0);
+  assert.equal(Number(ledgers[0].balanceAfter), Number(ledgers[0].amount));
+  assert.equal(Number(ledgers[1].balanceBefore), Number(ledgers[0].balanceAfter));
+  assert.equal(Number(ledgers[1].balanceAfter), 0.3);
+  const overview = await getQuotaOverview(actors.adminA, db);
+  assert.deepEqual(overview.summary, { balance: 0.3, totalRecharge: 0.1, totalUsage: 0 });
+
+  await expectServiceError(
+    adjustQuota(
+      actors.superAdmin,
+      { groupId: 101, entryType: "manual_credit", amount: 0.0000001, reason: "超精度" },
+      db,
+    ),
+    QuotaManagementError,
+    422,
+    "AMOUNT_PRECISION_INVALID",
+  );
+  await expectServiceError(
+    adjustQuota(
+      actors.superAdmin,
+      { groupId: 101, entryType: "manual_credit", amount: 999_999_999.9999995, reason: "大额超精度" },
+      db,
+    ),
+    QuotaManagementError,
+    422,
+    "AMOUNT_PRECISION_INVALID",
+  );
+  await expectServiceError(
+    adjustQuota(
+      actors.superAdmin,
+      { groupId: 101, entryType: "manual_credit", amount: 1_000_000_001, reason: "超上限" },
+      db,
+    ),
+    QuotaManagementError,
+    422,
+    "AMOUNT_TOO_LARGE",
+  );
+}
+
 async function seedAuditRows(db: Knex): Promise<void> {
   await db("o_auditLog").del();
   await db("o_auditLog").insert([
@@ -223,6 +282,7 @@ async function seedAuditRows(db: Knex): Promise<void> {
       action: "user.update",
       targetType: "user",
       targetId: "3",
+      targetRole: "creator",
       summaryJson: JSON.stringify({ name: "creator-a", route: "/users", password: "secret-password", token: "secret-token" }),
       result: "success",
       requestId: "request-admin-a",
@@ -235,6 +295,7 @@ async function seedAuditRows(db: Knex): Promise<void> {
       action: "user.update",
       targetType: "user",
       targetId: "5",
+      targetRole: "creator",
       summaryJson: JSON.stringify({ name: "creator-b" }),
       result: "failure",
       requestId: null,
@@ -247,6 +308,7 @@ async function seedAuditRows(db: Knex): Promise<void> {
       action: "user.update",
       targetType: "user",
       targetId: "6",
+      targetRole: "admin",
       summaryJson: JSON.stringify({ name: "admin-a-2" }),
       result: "success",
       requestId: "request-admin-target",
@@ -259,10 +321,24 @@ async function seedAuditRows(db: Knex): Promise<void> {
       action: "user.update",
       targetType: "user",
       targetId: "1",
+      targetRole: "super_admin",
       summaryJson: JSON.stringify({ name: "root" }),
       result: "success",
       requestId: "request-super-target",
       createdAt: 22,
+    },
+    {
+      actorUserId: 2,
+      actorRole: "admin",
+      groupId: 101,
+      action: "user.update",
+      targetType: "user",
+      targetId: "3",
+      targetRole: null,
+      summaryJson: JSON.stringify({ name: "legacy-creator" }),
+      result: "success",
+      requestId: "request-legacy-target-role",
+      createdAt: 23,
     },
   ]);
 }
@@ -270,8 +346,8 @@ async function seedAuditRows(db: Knex): Promise<void> {
 async function testAuditScopeAndRedaction(db: Knex): Promise<void> {
   await seedAuditRows(db);
   const superList = await listAudit(actors.superAdmin, { page: 1, pageSize: 100 }, db);
-  assert.equal(superList.total, 5);
-  assert.deepEqual(superList.items.map((item: any) => item.groupId), [102, 101, 101, 101, 101]);
+  assert.equal(superList.total, 6);
+  assert.deepEqual(superList.items.map((item: any) => item.groupId), [102, 101, 101, 101, 101, 101]);
   const quotaAudit = superList.items.find((item: any) => item.action === "quota.adjust")!;
   assert.equal(quotaAudit.actionLabel, "额度调整");
   assert.equal(quotaAudit.actorRoleLabel, "超级管理员");
@@ -305,6 +381,45 @@ async function testAuditScopeAndRedaction(db: Knex): Promise<void> {
     422,
     "PAGE_SIZE_INVALID",
   );
+}
+
+async function testAuditTargetRoleSnapshots(db: Knex): Promise<void> {
+  await seedAuditRows(db);
+  await writeAudit({
+    actor: actors.adminA,
+    groupId: 101,
+    action: "user.update",
+    targetType: "user",
+    targetId: 6,
+    summary: { name: "admin-a-2" },
+    result: "success",
+  }, db);
+  const snapshot = await db("o_auditLog")
+    .where({ action: "user.update", targetId: "6" })
+    .orderBy("id", "desc")
+    .first();
+  assert.equal(snapshot.targetRole, "admin");
+  await assert.rejects(
+    writeAudit({
+      actor: actors.adminA,
+      groupId: 101,
+      action: "user.update",
+      targetType: "user",
+      targetId: 3,
+      targetRole: "admin",
+      summary: {},
+      result: "success",
+    }, db),
+    (cause: unknown) => cause instanceof AuditLogError && cause.code === "TARGET_ROLE_MISMATCH",
+  );
+
+  await db("o_user").where({ id: 6 }).update({ role: "creator" });
+  let adminList = await listAudit(actors.adminA, { page: 1, pageSize: 100 }, db);
+  assert.equal(adminList.items.some((item: any) => item.targetId === "6"), false);
+  await db("o_user").where({ id: 6 }).del();
+  adminList = await listAudit(actors.adminA, { page: 1, pageSize: 100 }, db);
+  assert.equal(adminList.items.some((item: any) => item.targetId === "6"), false);
+  assert.equal(adminList.items.some((item: any) => item.requestId === "request-legacy-target-role"), false);
 }
 
 async function requestJson(url: string, init?: RequestInit): Promise<{ status: number; body: any }> {
@@ -351,6 +466,8 @@ async function testAdminRoutes(db: Knex): Promise<void> {
       { ...validAdjustment, entryType: "usage_debit" },
       { ...validAdjustment, extra: true },
       { ...validAdjustment, reason: "x" },
+      { ...validAdjustment, amount: 0.0000001 },
+      { ...validAdjustment, amount: 1_000_000_001 },
     ]) {
       const response = await requestJson(quotaUrl, {
         method: "POST",
@@ -467,7 +584,9 @@ async function main(): Promise<void> {
     await migrateGenerationQueue(db);
     await testQuotaOverviewScopeAndAggregation(db);
     await testQuotaAdjustmentsAndRollback(db);
+    await testQuotaMicroUnitArithmetic(db);
     await testAuditScopeAndRedaction(db);
+    await testAuditTargetRoleSnapshots(db);
     await testAdminRoutes(db);
     await testGeneratedOverviewRouteAssembly();
   } finally {

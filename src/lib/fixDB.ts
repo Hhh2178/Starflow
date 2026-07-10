@@ -39,6 +39,7 @@ export async function migrateGroupOwnership(knex: Knex): Promise<void> {
     table.text("action").notNullable();
     table.text("targetType").notNullable();
     table.text("targetId");
+    table.text("targetRole");
     table.text("summaryJson").notNullable().defaultTo("{}");
     table.text("result").notNullable();
     table.text("requestId");
@@ -51,6 +52,7 @@ export async function migrateGroupOwnership(knex: Knex): Promise<void> {
   });
 
   await addColumn(knex, "o_user", "groupId", "integer");
+  await addColumn(knex, "o_auditLog", "targetRole", "text");
   await addColumn(knex, "o_project", "ownerUserId", "integer");
   await addColumn(knex, "o_project", "groupId", "integer");
   await addColumn(knex, "o_tasks", "ownerUserId", "integer");

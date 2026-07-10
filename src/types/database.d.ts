@@ -1,4 +1,4 @@
-// @db-hash e93b9eba8b6855913f31ab025855436b
+// @db-hash 5cba15b9abf1c485cd89424b23e1171d
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -78,6 +78,7 @@ export interface o_auditLog {
   'result': string;
   'summaryJson'?: string;
   'targetId'?: string | null;
+  'targetRole'?: string | null;
   'targetType': string;
 }
 export interface o_concurrencyPolicy {

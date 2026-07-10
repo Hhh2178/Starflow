@@ -8,11 +8,15 @@ import {
   type QuotaAdjustmentInput,
 } from "@/services/quotaManagement";
 import type { AuthUser } from "@/types/auth";
+import { hasMoneyPrecision, MAX_QUOTA_AMOUNT } from "@/lib/money";
 
 const adjustmentSchema = z.strictObject({
   groupId: z.number().int().positive(),
   entryType: z.enum(["manual_topup", "manual_credit", "manual_debit"]),
-  amount: z.number().positive(),
+  amount: z.number()
+    .positive()
+    .max(MAX_QUOTA_AMOUNT)
+    .refine(hasMoneyPrecision, "调整金额最多保留 6 位小数"),
   reason: z.string().trim().min(2).max(500),
 });
 

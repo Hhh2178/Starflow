@@ -39,6 +39,39 @@ export class AuditLogError extends Error {
   }
 }
 
+async function inTransaction<T>(
+  connection: AuditConnection,
+  run: (trx: Knex.Transaction) => Promise<T>,
+): Promise<T> {
+  if ((connection as Knex.Transaction).isTransaction) return run(connection as Knex.Transaction);
+  return (connection as Knex).transaction(run);
+}
+
+function isUserRole(value: unknown): value is UserRole {
+  return value === "creator" || value === "admin" || value === "super_admin";
+}
+
+async function resolveTargetRole(
+  connection: AuditConnection,
+  targetType: string,
+  targetId: string | number | undefined,
+  explicitRole: UserRole | undefined,
+): Promise<UserRole | null> {
+  if (explicitRole !== undefined && !isUserRole(explicitRole)) {
+    throw new AuditLogError(422, "TARGET_ROLE_INVALID", "审计目标角色无效");
+  }
+  if (targetType !== "user") return null;
+  const normalizedTargetId = Number(targetId);
+  const target = Number.isInteger(normalizedTargetId) && normalizedTargetId > 0
+    ? await connection("o_user").where({ id: normalizedTargetId }).select("role").first()
+    : undefined;
+  const derivedRole = isUserRole(target?.role) ? target.role : null;
+  if (explicitRole !== undefined && derivedRole !== null && explicitRole !== derivedRole) {
+    throw new AuditLogError(422, "TARGET_ROLE_MISMATCH", "审计目标角色与当前用户角色不一致");
+  }
+  return derivedRole ?? explicitRole ?? null;
+}
+
 function sanitizeSummary(summary: Record<string, unknown>): Record<string, AuditScalar> {
   const sanitized: Record<string, AuditScalar> = {};
   for (const [key, value] of Object.entries(summary)) {
@@ -91,23 +124,33 @@ export async function writeAudit(
     action: string;
     targetType: string;
     targetId?: string | number;
+    targetRole?: UserRole;
     summary: Record<string, AuditScalar>;
     result: "success" | "failure";
     requestId?: string;
   },
   connection: AuditConnection = db,
 ): Promise<void> {
-  await connection("o_auditLog").insert({
-    actorUserId: input.actor.id,
-    actorRole: input.actor.role,
-    groupId: input.groupId,
-    action: input.action,
-    targetType: input.targetType,
-    targetId: input.targetId == null ? null : String(input.targetId),
-    summaryJson: JSON.stringify(sanitizeSummary(input.summary)),
-    result: input.result,
-    requestId: input.requestId ?? null,
-    createdAt: Date.now(),
+  await inTransaction(connection, async (trx) => {
+    const targetRole = await resolveTargetRole(
+      trx,
+      input.targetType,
+      input.targetId,
+      input.targetRole,
+    );
+    await trx("o_auditLog").insert({
+      actorUserId: input.actor.id,
+      actorRole: input.actor.role,
+      groupId: input.groupId,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId == null ? null : String(input.targetId),
+      targetRole,
+      summaryJson: JSON.stringify(sanitizeSummary(input.summary)),
+      result: input.result,
+      requestId: input.requestId ?? null,
+      createdAt: Date.now(),
+    });
   });
 }
 
@@ -134,8 +177,7 @@ export async function listAudit(
     throw new AuditLogError(422, "GROUP_ID_INVALID", "分组 ID 必须是正整数");
   }
 
-  const createQuery = () => connection("o_auditLog")
-    .leftJoin("o_user as targetUser", "targetUser.id", "o_auditLog.targetId");
+  const createQuery = () => connection("o_auditLog");
   const applyScope = (query: Knex.QueryBuilder) => {
     if (actor.role === "admin") {
       return query
@@ -143,8 +185,7 @@ export async function listAudit(
         .whereNot("o_auditLog.actorRole", "super_admin")
         .andWhere(function () {
           this.whereNot("o_auditLog.targetType", "user")
-            .orWhereNull("targetUser.role")
-            .orWhereNotIn("targetUser.role", ["admin", "super_admin"]);
+            .orWhere("o_auditLog.targetRole", "creator");
         });
     }
     return input.groupId === undefined
@@ -163,6 +204,7 @@ export async function listAudit(
       "o_auditLog.action",
       "o_auditLog.targetType",
       "o_auditLog.targetId",
+      "o_auditLog.targetRole",
       "o_auditLog.summaryJson",
       "o_auditLog.result",
       "o_auditLog.requestId",
@@ -192,6 +234,7 @@ export async function listAudit(
         targetType,
         targetTypeLabel: targetTypeLabels[targetType] ?? "系统资源",
         targetId: row.targetId == null ? null : String(row.targetId),
+        targetRole: isUserRole(row.targetRole) ? row.targetRole : null,
         summary: parseSafeSummary(row.summaryJson),
         result,
         resultLabel: result === "success" ? "成功" : "失败",

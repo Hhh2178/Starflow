@@ -74,6 +74,7 @@ export default async (
         table.text("action").notNullable();
         table.text("targetType").notNullable();
         table.text("targetId");
+        table.text("targetRole");
         table.text("summaryJson").notNullable().defaultTo("{}");
         table.text("result").notNullable();
         table.text("requestId");

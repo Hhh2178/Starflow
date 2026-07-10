@@ -1,6 +1,13 @@
 import type { Knex } from "knex";
 import type { AuthUser } from "@/types/auth";
 import { writeAudit } from "@/services/auditLog";
+import {
+  fromMoneyMicros,
+  hasMoneyPrecision,
+  MAX_QUOTA_AMOUNT,
+  normalizeMoney,
+  toMoneyMicros,
+} from "@/lib/money";
 
 type QuotaConnection = Knex | Knex.Transaction;
 
@@ -46,9 +53,9 @@ function toLedgerDto(ledger: any, redactActor: boolean = false) {
     id: Number(ledger.id),
     groupId: Number(ledger.groupId),
     entryType: String(ledger.entryType),
-    amount: Number(ledger.amount),
-    balanceBefore: Number(ledger.balanceBefore),
-    balanceAfter: Number(ledger.balanceAfter),
+    amount: normalizeMoney(Number(ledger.amount)),
+    balanceBefore: normalizeMoney(Number(ledger.balanceBefore)),
+    balanceAfter: normalizeMoney(Number(ledger.balanceAfter)),
     actorUserId: redactActor || ledger.actorUserId == null ? null : Number(ledger.actorUserId),
     usageLedgerId: ledger.usageLedgerId == null ? null : Number(ledger.usageLedgerId),
     reason: String(ledger.reason),
@@ -64,16 +71,7 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
     .select("o_group.id", "o_group.name", "o_quotaAccount.balance")
     .orderBy("o_group.id", "asc");
   let totalsQuery = resolvedConnection("o_quotaLedger")
-    .select("groupId")
-    .sum({
-      totalRecharge: resolvedConnection.raw(
-        "CASE WHEN entryType = 'manual_topup' AND amount > 0 THEN amount ELSE 0 END",
-      ),
-      totalUsage: resolvedConnection.raw(
-        "CASE WHEN entryType = 'usage_debit' THEN ABS(amount) ELSE 0 END",
-      ),
-    })
-    .groupBy("groupId");
+    .select("groupId", "entryType", "amount");
   let logsQuery = resolvedConnection("o_quotaLedger")
     .leftJoin("o_user as actor", "actor.id", "o_quotaLedger.actorUserId")
     .select(
@@ -99,29 +97,36 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
   }
 
   const [groups, totalRows, ledgers] = await Promise.all([groupsQuery, totalsQuery, logsQuery]);
-  const totals = new Map<number, { recharge: number; usage: number }>();
+  const totals = new Map<number, { rechargeMicros: number; usageMicros: number }>();
   for (const row of totalRows as any[]) {
-    totals.set(Number(row.groupId), {
-      recharge: Number(row.totalRecharge ?? 0),
-      usage: Number(row.totalUsage ?? 0),
-    });
+    const groupId = Number(row.groupId);
+    const total = totals.get(groupId) ?? { rechargeMicros: 0, usageMicros: 0 };
+    const amountMicros = toMoneyMicros(Number(row.amount));
+    if (row.entryType === "manual_topup" && amountMicros > 0) total.rechargeMicros += amountMicros;
+    if (row.entryType === "usage_debit") total.usageMicros += Math.abs(amountMicros);
+    totals.set(groupId, total);
   }
   const groupDtos = groups.map((group: any) => ({
     groupId: Number(group.id),
     groupName: String(group.name),
-    balance: Number(group.balance ?? 0),
-    totalRecharge: totals.get(Number(group.id))?.recharge ?? 0,
-    totalUsage: totals.get(Number(group.id))?.usage ?? 0,
+    balance: normalizeMoney(Number(group.balance ?? 0)),
+    totalRecharge: fromMoneyMicros(totals.get(Number(group.id))?.rechargeMicros ?? 0),
+    totalUsage: fromMoneyMicros(totals.get(Number(group.id))?.usageMicros ?? 0),
   }));
+  const summaryMicros = groupDtos.reduce(
+    (summary, group) => ({
+      balance: summary.balance + toMoneyMicros(group.balance),
+      totalRecharge: summary.totalRecharge + toMoneyMicros(group.totalRecharge),
+      totalUsage: summary.totalUsage + toMoneyMicros(group.totalUsage),
+    }),
+    { balance: 0, totalRecharge: 0, totalUsage: 0 },
+  );
   return {
-    summary: groupDtos.reduce(
-      (summary, group) => ({
-        balance: summary.balance + group.balance,
-        totalRecharge: summary.totalRecharge + group.totalRecharge,
-        totalUsage: summary.totalUsage + group.totalUsage,
-      }),
-      { balance: 0, totalRecharge: 0, totalUsage: 0 },
-    ),
+    summary: {
+      balance: fromMoneyMicros(summaryMicros.balance),
+      totalRecharge: fromMoneyMicros(summaryMicros.totalRecharge),
+      totalUsage: fromMoneyMicros(summaryMicros.totalUsage),
+    },
     groups: groupDtos,
     logs: ledgers.map((ledger: any) => toLedgerDto(
       ledger,
@@ -147,6 +152,12 @@ export async function adjustQuota(
   if (!Number.isFinite(input.amount) || input.amount <= 0) {
     throw new QuotaManagementError(422, "AMOUNT_INVALID", "调整金额必须大于零");
   }
+  if (input.amount > MAX_QUOTA_AMOUNT) {
+    throw new QuotaManagementError(422, "AMOUNT_TOO_LARGE", `调整金额不能超过 ${MAX_QUOTA_AMOUNT}`);
+  }
+  if (!hasMoneyPrecision(input.amount)) {
+    throw new QuotaManagementError(422, "AMOUNT_PRECISION_INVALID", "调整金额最多保留 6 位小数");
+  }
   const reason = input.reason.trim();
   if (reason.length < 2 || reason.length > 500) {
     throw new QuotaManagementError(422, "REASON_INVALID", "调整原因长度必须为 2 到 500 个字符");
@@ -159,9 +170,13 @@ export async function adjustQuota(
     const account = await trx("o_quotaAccount").where({ groupId: input.groupId }).first();
     if (!account) throw new QuotaManagementError(404, "QUOTA_ACCOUNT_NOT_FOUND", "额度账户不存在");
 
-    const balanceBefore = Number(account.balance);
-    const signedAmount = input.entryType === "manual_debit" ? -input.amount : input.amount;
-    const balanceAfter = balanceBefore + signedAmount;
+    const balanceBeforeMicros = toMoneyMicros(Number(account.balance));
+    const amountMicros = toMoneyMicros(input.amount);
+    const signedAmountMicros = input.entryType === "manual_debit" ? -amountMicros : amountMicros;
+    const balanceAfterMicros = balanceBeforeMicros + signedAmountMicros;
+    const balanceBefore = fromMoneyMicros(balanceBeforeMicros);
+    const signedAmount = fromMoneyMicros(signedAmountMicros);
+    const balanceAfter = fromMoneyMicros(balanceAfterMicros);
     const createdAt = Date.now();
     const [ledgerId] = await trx("o_quotaLedger").insert({
       groupId: input.groupId,

@@ -1,5 +1,6 @@
 import type { Knex } from "knex";
 import type { MeteringResult } from "@/types/generationQueue";
+import { fromMoneyMicros, normalizeMoney, toMoneyMicros } from "@/lib/money";
 
 type UsageConnection = Knex | Knex.Transaction;
 
@@ -26,7 +27,7 @@ function toUsageRecord(row: any): UsageLedgerRecord {
   return {
     id: Number(row.id),
     jobId: Number(row.jobId),
-    estimatedCost: row.estimatedCost == null ? null : Number(row.estimatedCost),
+    estimatedCost: row.estimatedCost == null ? null : normalizeMoney(Number(row.estimatedCost)),
   };
 }
 
@@ -53,6 +54,9 @@ export async function completeGenerationUsage(
       leaseExpiresAt: null,
       heartbeatAt: null,
     });
+    const normalizedCost = metering.estimatedCost == null || !Number.isFinite(metering.estimatedCost)
+      ? null
+      : normalizeMoney(metering.estimatedCost);
     const [usageId] = await trx("o_usageLedger").insert({
       jobId,
       groupId: Number(job.groupId),
@@ -62,26 +66,29 @@ export async function completeGenerationUsage(
       modelId: metering.modelId,
       taskType: String(job.taskType),
       unitJson: JSON.stringify(metering.units),
-      estimatedCost: metering.estimatedCost,
+      estimatedCost: normalizedCost,
       currency: metering.currency,
       pricingSnapshotJson: JSON.stringify(metering.pricingSnapshot),
       result: "succeeded",
       createdAt: completedAt,
     });
 
-    const cost = metering.estimatedCost;
-    if (cost !== null && Number.isFinite(cost) && cost > 0) {
+    const cost = normalizedCost;
+    if (cost !== null && cost > 0) {
       let account = await trx("o_quotaAccount").where({ groupId: job.groupId }).first();
       if (!account) {
         await trx("o_quotaAccount").insert({ groupId: job.groupId, balance: 0, updatedAt: completedAt });
         account = { balance: 0 };
       }
-      const balanceBefore = Number(account.balance);
-      const balanceAfter = balanceBefore - cost;
+      const balanceBeforeMicros = toMoneyMicros(Number(account.balance));
+      const costMicros = toMoneyMicros(cost);
+      const balanceAfterMicros = balanceBeforeMicros - costMicros;
+      const balanceBefore = fromMoneyMicros(balanceBeforeMicros);
+      const balanceAfter = fromMoneyMicros(balanceAfterMicros);
       await trx("o_quotaLedger").insert({
         groupId: Number(job.groupId),
         entryType: "usage_debit",
-        amount: -cost,
+        amount: fromMoneyMicros(-costMicros),
         balanceBefore,
         balanceAfter,
         actorUserId: null,

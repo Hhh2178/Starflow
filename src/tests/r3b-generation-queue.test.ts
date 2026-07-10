@@ -1713,6 +1713,61 @@ async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(adminQuotaOverview.logs.every((log) => log.groupId === 101), true);
 }
 
+async function testUsageMicroUnitArithmetic(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  await db("o_usageLedger").del();
+  await db("o_quotaLedger").del();
+  await db("o_quotaAccount").where({ groupId: 101 }).update({ balance: 0.3 });
+  const baseJob = {
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    handlerKey: "test.usage.money",
+    taskType: "text",
+    status: "running",
+    priority: 0,
+    payloadJson: "{}",
+    queuedAt: 1,
+    attemptCount: 1,
+  };
+  const [firstJobId] = await db("o_generationJob").insert({ ...baseJob, idempotencyKey: "usage-money-01" });
+  const [secondJobId] = await db("o_generationJob").insert({ ...baseJob, idempotencyKey: "usage-money-02" });
+  const metering = {
+    providerId: "vendor-money",
+    modelId: "model-money",
+    units: { requests: 1 },
+    currency: "CNY",
+    pricingSnapshot: {},
+    providerRequestId: null,
+  };
+  const first = await completeGenerationUsage(
+    Number(firstJobId),
+    { ok: true },
+    { ...metering, estimatedCost: 0.1 },
+    db,
+    600,
+  );
+  const second = await completeGenerationUsage(
+    Number(secondJobId),
+    { ok: true },
+    { ...metering, estimatedCost: 0.2 },
+    db,
+    601,
+  );
+  assert.equal(first.estimatedCost, 0.1);
+  assert.equal(second.estimatedCost, 0.2);
+  assert.equal(Number((await db("o_quotaAccount").where({ groupId: 101 }).first()).balance), 0);
+  const ledgers = await db("o_quotaLedger").where({ groupId: 101 }).orderBy("id", "asc");
+  assert.deepEqual(ledgers.map((row) => ({
+    amount: Number(row.amount),
+    balanceBefore: Number(row.balanceBefore),
+    balanceAfter: Number(row.balanceAfter),
+  })), [
+    { amount: -0.1, balanceBefore: 0.3, balanceAfter: 0.2 },
+    { amount: -0.2, balanceBefore: 0.2, balanceAfter: 0 },
+  ]);
+}
+
 async function main(): Promise<void> {
   testCapacityEvaluation();
   testFairSelection();
@@ -1779,6 +1834,7 @@ async function main(): Promise<void> {
     await testExpiredLeaseRecovery(db);
     await testWorkerLifecycle(db);
     await testUsageAndQuotaLedger(db);
+    await testUsageMicroUnitArithmetic(db);
     await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).update({ totalLimit: 7 });
     await migrateGenerationQueue(db);
     assert.equal((await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).first()).totalLimit, 7);

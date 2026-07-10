@@ -30,3 +30,40 @@ export type CapacityLimitReason =
   | "USER_TYPE_LIMIT";
 
 export type CapacityDecision = { allowed: true } | { allowed: false; reason: CapacityLimitReason };
+
+export interface MeteringResult {
+  providerId: string | null;
+  modelId: string | null;
+  units: Record<string, number>;
+  estimatedCost: number | null;
+  currency: string | null;
+  pricingSnapshot: Record<string, string | number>;
+  providerRequestId: string | null;
+}
+
+export interface GenerationExecutionContext {
+  jobId: number;
+  groupId: number;
+  ownerUserId: number;
+  projectId: number | null;
+  signal: AbortSignal;
+  heartbeat(): Promise<void>;
+  setProviderRequestId(id: string): Promise<void>;
+}
+
+export interface GenerationExecutionResult<TResult> {
+  result: TResult;
+  metering: MeteringResult;
+}
+
+export interface GenerationJobHandler<TPayload = unknown, TResult = unknown> {
+  key: string;
+  taskType: GenerationTaskType;
+  canRetryAfterProviderSubmission: boolean;
+  parsePayload(value: unknown): TPayload;
+  execute(
+    context: GenerationExecutionContext,
+    payload: TPayload,
+  ): Promise<GenerationExecutionResult<TResult>>;
+  cancel?(context: GenerationExecutionContext): Promise<void>;
+}

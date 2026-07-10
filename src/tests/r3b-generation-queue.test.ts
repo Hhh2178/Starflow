@@ -17,6 +17,9 @@ import {
   reprioritizeGenerationJob,
 } from "@/services/generationQueue";
 import { chooseFairCandidate, claimNextJob } from "@/services/generationScheduler";
+import { executeClaimedJob, recoverExpiredJobs } from "@/services/generationScheduler";
+import { createGenerationJobRegistry } from "@/jobs/registry";
+import type { GenerationJobHandler } from "@/types/generationQueue";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -362,6 +365,128 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(await claimNextJob(101, { connection: db, leaseOwner: "fifo", now: 30_001 }), null);
 }
 
+async function testExpiredLeaseRecovery(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  const handler = (key: string, canRetryAfterProviderSubmission: boolean): GenerationJobHandler => ({
+    key,
+    taskType: "text",
+    canRetryAfterProviderSubmission,
+    parsePayload: (value) => value,
+    execute: async () => ({
+      result: {},
+      metering: {
+        providerId: null,
+        modelId: null,
+        units: {},
+        estimatedCost: null,
+        currency: null,
+        pricingSnapshot: {},
+        providerRequestId: null,
+      },
+    }),
+  });
+  const registry = createGenerationJobRegistry([
+    handler("test.idempotent", true),
+    handler("test.non-idempotent", false),
+  ]);
+  const base = {
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    taskType: "text",
+    priority: 0,
+    payloadJson: "{}",
+    queuedAt: 1,
+    attemptCount: 1,
+  };
+  await db("o_generationJob").insert([
+    { ...base, handlerKey: "test.idempotent", status: "queued", idempotencyKey: "recover-queued" },
+    {
+      ...base,
+      handlerKey: "test.non-idempotent",
+      status: "running",
+      idempotencyKey: "recover-before-submit",
+      leaseExpiresAt: 99,
+    },
+    {
+      ...base,
+      handlerKey: "test.idempotent",
+      status: "running",
+      idempotencyKey: "recover-idempotent",
+      providerRequestId: "provider-1",
+      leaseExpiresAt: 99,
+    },
+    {
+      ...base,
+      handlerKey: "test.non-idempotent",
+      status: "running",
+      idempotencyKey: "recover-unknown",
+      providerRequestId: "provider-2",
+      leaseExpiresAt: 99,
+    },
+  ]);
+
+  const result = await recoverExpiredJobs({ connection: db, registry, now: 100 });
+  assert.deepEqual(result, { requeued: 2, needsAttention: 1 });
+  assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-queued" }).first()).status, "queued");
+  assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-before-submit" }).first()).status, "queued");
+  assert.equal((await db("o_generationJob").where({ idempotencyKey: "recover-idempotent" }).first()).status, "queued");
+  const unknown = await db("o_generationJob").where({ idempotencyKey: "recover-unknown" }).first();
+  assert.equal(unknown.status, "needs_attention");
+  assert.equal(unknown.errorCode, "EXTERNAL_STATE_UNKNOWN");
+}
+
+async function testWorkerLifecycle(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  let executedOutsideTransaction = false;
+  const workerHandler: GenerationJobHandler<{ value: number }, { doubled: number }> = {
+    key: "test.worker",
+    taskType: "text",
+    canRetryAfterProviderSubmission: false,
+    parsePayload: (value) => value as { value: number },
+    execute: async (context, payload) => {
+      executedOutsideTransaction = !(db as any).isTransaction;
+      await context.setProviderRequestId("provider-worker-1");
+      await context.heartbeat();
+      return {
+        result: { doubled: payload.value * 2 },
+        metering: {
+          providerId: "fake",
+          modelId: "fake-text",
+          units: { requests: 1 },
+          estimatedCost: null,
+          currency: null,
+          pricingSnapshot: {},
+          providerRequestId: "provider-worker-1",
+        },
+      };
+    },
+  };
+  const registry = createGenerationJobRegistry([workerHandler as GenerationJobHandler]);
+  const [jobId] = await db("o_generationJob").insert({
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    handlerKey: "test.worker",
+    taskType: "text",
+    status: "running",
+    priority: 0,
+    payloadJson: JSON.stringify({ value: 4 }),
+    idempotencyKey: "worker-lifecycle",
+    queuedAt: 1,
+    startedAt: 100,
+    leaseOwner: "worker-test",
+    leaseExpiresAt: 200,
+  });
+  await executeClaimedJob(Number(jobId), { connection: db, registry, heartbeatIntervalMs: 0, now: () => 150 });
+  const completed = await db("o_generationJob").where({ id: jobId }).first();
+  assert.equal(executedOutsideTransaction, true);
+  assert.equal(completed.status, "succeeded");
+  assert.equal(completed.providerRequestId, "provider-worker-1");
+  assert.deepEqual(JSON.parse(completed.resultJson), { doubled: 8 });
+  assert.equal(completed.leaseOwner, null);
+}
+
 async function main(): Promise<void> {
   testCapacityEvaluation();
   testFairSelection();
@@ -414,6 +539,8 @@ async function main(): Promise<void> {
     );
     await testPolicyAuthorization(db);
     await testQueueAndAtomicClaim(db);
+    await testExpiredLeaseRecovery(db);
+    await testWorkerLifecycle(db);
     await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).update({ totalLimit: 7 });
     await migrateGenerationQueue(db);
     assert.equal((await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).first()).totalLimit, 7);

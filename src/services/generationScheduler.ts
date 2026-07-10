@@ -2,6 +2,7 @@ import type { Knex } from "knex";
 import { evaluateCapacity } from "@/services/concurrencyPolicy";
 import type { CapacityUsage, ConcurrencyLimit, GenerationTaskType } from "@/types/generationQueue";
 import type { GenerationJobRecord } from "@/services/generationQueue";
+import type { GenerationJobRegistry } from "@/jobs/registry";
 
 type SchedulerConnection = Knex | Knex.Transaction;
 
@@ -16,6 +17,19 @@ export interface ClaimOptions {
   connection?: SchedulerConnection;
   leaseOwner: string;
   now?: number;
+}
+
+export interface RecoveryOptions {
+  connection?: SchedulerConnection;
+  registry: GenerationJobRegistry;
+  now?: number;
+}
+
+export interface ExecuteClaimedJobOptions {
+  connection?: SchedulerConnection;
+  registry: GenerationJobRegistry;
+  heartbeatIntervalMs?: number;
+  now?: () => number;
 }
 
 function sortFairCandidates(queued: QueueCandidate[], lastStartedByUser: Map<number, number>): QueueCandidate[] {
@@ -169,4 +183,121 @@ export async function claimNextJob(groupId: number, options: ClaimOptions): Prom
     }
     return null;
   });
+}
+
+export async function recoverExpiredJobs(
+  options: RecoveryOptions,
+): Promise<{ requeued: number; needsAttention: number }> {
+  const connection = await resolveConnection(options.connection);
+  const now = options.now ?? Date.now();
+  return inTransaction(connection, async (trx) => {
+    const expired = await trx("o_generationJob")
+      .where({ status: "running" })
+      .whereNotNull("leaseExpiresAt")
+      .where("leaseExpiresAt", "<=", now)
+      .select("*");
+    let requeued = 0;
+    let needsAttention = 0;
+
+    for (const job of expired) {
+      const handler = options.registry.get(String(job.handlerKey));
+      const safeToRetry = job.providerRequestId == null || handler?.canRetryAfterProviderSubmission === true;
+      if (safeToRetry) {
+        const updated = await trx("o_generationJob")
+          .where({ id: job.id, status: "running" })
+          .update({
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            startedAt: null,
+            errorCode: null,
+            errorMessage: null,
+          });
+        requeued += updated;
+      } else {
+        const updated = await trx("o_generationJob")
+          .where({ id: job.id, status: "running" })
+          .update({
+            status: "needs_attention",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            heartbeatAt: null,
+            errorCode: "EXTERNAL_STATE_UNKNOWN",
+            errorMessage: "Provider 已接收请求，无法安全自动重试",
+            finishedAt: now,
+          });
+        needsAttention += updated;
+      }
+    }
+    return { requeued, needsAttention };
+  });
+}
+
+export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJobOptions): Promise<void> {
+  const connection = await resolveConnection(options.connection);
+  const now = options.now ?? Date.now;
+  const job = await connection("o_generationJob").where({ id: jobId, status: "running" }).first();
+  if (!job) throw new Error("运行中的生成任务不存在");
+  const handler = options.registry.get(String(job.handlerKey));
+  if (!handler || handler.taskType !== job.taskType) {
+    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
+      status: "needs_attention",
+      errorCode: "HANDLER_NOT_FOUND",
+      errorMessage: "找不到可信的任务处理器",
+      finishedAt: now(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+    });
+    return;
+  }
+
+  const controller = new AbortController();
+  const heartbeat = async () => {
+    const timestamp = now();
+    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
+      heartbeatAt: timestamp,
+      leaseExpiresAt: timestamp + 30_000,
+    });
+  };
+  const context = {
+    jobId,
+    groupId: Number(job.groupId),
+    ownerUserId: Number(job.ownerUserId),
+    projectId: job.projectId == null ? null : Number(job.projectId),
+    signal: controller.signal,
+    heartbeat,
+    setProviderRequestId: async (id: string) => {
+      await connection("o_generationJob").where({ id: jobId, status: "running" }).update({ providerRequestId: id });
+    },
+  };
+  const intervalMs = options.heartbeatIntervalMs ?? 10_000;
+  const timer = intervalMs > 0 ? setInterval(() => void heartbeat().catch(() => undefined), intervalMs) : null;
+
+  try {
+    const payload = handler.parsePayload(JSON.parse(String(job.payloadJson)));
+    const execution = await handler.execute(context, payload);
+    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
+      status: "succeeded",
+      resultJson: JSON.stringify(execution.result),
+      providerRequestId: execution.metering.providerRequestId ?? job.providerRequestId ?? null,
+      finishedAt: now(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+    });
+  } catch (error) {
+    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
+      status: "failed",
+      errorCode: "HANDLER_EXECUTION_FAILED",
+      errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      finishedAt: now(),
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+    });
+  } finally {
+    if (timer) clearInterval(timer);
+  }
 }

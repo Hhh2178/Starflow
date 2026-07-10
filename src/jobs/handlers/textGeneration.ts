@@ -41,11 +41,54 @@ const productionAgentPayloadSchema = z.object({
   ...commonTextPayloadShape,
 }).strict();
 
+const stylePromptPayloadSchema = z.object({
+  operation: z.literal("style_prompt"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  images: z.array(z.string().startsWith("/oss/")).min(1),
+}).strict();
+
+const assetPromptPayloadSchema = z.object({
+  operation: z.literal("asset_prompt"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  otherTextPrompt: z.string(),
+}).strict();
+
+const assetAudioPayloadSchema = z.object({
+  operation: z.literal("asset_audio"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+}).strict();
+
+const scriptAssetsPayloadSchema = z.object({
+  operation: z.literal("script_assets"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+}).strict();
+
+const aiRegexPayloadSchema = z.object({
+  operation: z.literal("ai_regex"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  content: z.string().min(1).max(2_000),
+}).strict();
+
 export const textGenerationPayloadSchema = z.discriminatedUnion("operation", [
   novelEventsPayloadSchema,
   videoPromptPayloadSchema,
   scriptAgentPayloadSchema,
   productionAgentPayloadSchema,
+  stylePromptPayloadSchema,
+  assetPromptPayloadSchema,
+  assetAudioPayloadSchema,
+  scriptAssetsPayloadSchema,
+  aiRegexPayloadSchema,
 ]);
 
 export type TextGenerationPayload = z.infer<typeof textGenerationPayloadSchema>;

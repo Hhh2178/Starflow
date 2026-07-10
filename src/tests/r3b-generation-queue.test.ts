@@ -37,6 +37,13 @@ import {
   enqueueVideoJobs,
   enqueueVideoPromptJobs,
 } from "@/services/generationWorkflows";
+import {
+  enqueueAiRegexJobs,
+  enqueueAssetAudioJobs,
+  enqueueAssetPromptJobs,
+  enqueueScriptAssetJobs,
+  enqueueStylePromptJobs,
+} from "@/services/productionTextWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
 import { getQuotaOverview } from "@/services/quotaManagement";
 import { createGetJobRouter } from "@/routes/generation/getJob";
@@ -216,6 +223,118 @@ function testTextGenerationPayloadContract(): void {
       prompt: "",
     }).operation, operation);
   }
+
+  const productionTextPayloads = [
+    { operation: "style_prompt", projectId: 1001, targetId: 1001, model: "universalAi", images: ["/oss/1001/style/a.jpg"] },
+    { operation: "asset_prompt", projectId: 1001, targetId: 601, model: "universalAi", otherTextPrompt: "keep style" },
+    { operation: "asset_audio", projectId: 1001, targetId: 601, model: "universalAi" },
+    { operation: "script_assets", projectId: 1001, targetId: 801, model: "universalAi" },
+    { operation: "ai_regex", projectId: 1001, targetId: 1001, model: "universalAi", content: "第1集 标题" },
+  ];
+  for (const payload of productionTextPayloads) {
+    assert.deepEqual(textGenerationPayloadSchema.parse(payload), payload);
+  }
+}
+
+async function testCoreProductionTextExecutors(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_project").where({ id: 1001 }).update({ artStyle: "test-style" });
+  await db("o_assets").where({ id: 601 }).update({
+    name: "Hero",
+    type: "role",
+    describe: "Lead character",
+    prompt: null,
+    promptState: "生成中",
+    audioBindState: "生成中",
+  });
+  await db("o_script").where({ id: 801 }).update({ content: "Hero enters the city", extractState: 0 });
+  await db("o_prompt").insert([
+    { type: "audioBindPrompt", data: "match audio", useData: "match audio" },
+    { type: "scriptAssetExtraction", data: "extract assets", useData: "extract assets" },
+  ]);
+  const providerMarks: string[] = [];
+  const context = {
+    jobId: 7001,
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    signal: new AbortController().signal,
+    heartbeat: async () => undefined,
+    setProviderRequestId: async (id: string) => { providerMarks.push(id); },
+  };
+  const invokeText = async (_model: "universalAi", input: any) => {
+    if (input.tools?.resultTool) {
+      const userContent = String(input.messages?.find((message: any) => message.role === "user")?.content || "");
+      if (userContent.includes("候选音频列表")) {
+        await input.tools.resultTool.execute({ audioId: 603 });
+      } else {
+        await input.tools.resultTool.execute({
+          newAssets: [{ name: "City", desc: "Modern city", type: "scene", scriptIds: [801] }],
+          existingAssetRefs: [{ name: "Hero", scriptIds: [801] }],
+        });
+      }
+    }
+    if (input.system?.includes("正则表达式专家")) return { text: "/第\\s*(\\d+)集\\s*([^\\n]*)/g" };
+    if (Array.isArray(input.messages?.[0]?.content)) return { text: "(画风：二维动画,2D animation)" };
+    return { text: "polished hero", _output: "polished hero" };
+  };
+  const dependencies = {
+    connection: db,
+    getArtPrompt: () => "visual manual",
+    getImageBase64: async () => "local-image-base64",
+    invokeText,
+  } as any;
+
+  const style = await executeCoreTextGeneration({
+    operation: "style_prompt",
+    projectId: 1001,
+    targetId: 1001,
+    model: "universalAi",
+    images: ["/oss/1001/style/a.jpg"],
+  } as any, context, dependencies);
+  const prompt = await executeCoreTextGeneration({
+    operation: "asset_prompt",
+    projectId: 1001,
+    targetId: 601,
+    model: "universalAi",
+    otherTextPrompt: "keep style",
+  } as any, context, dependencies);
+  const audio = await executeCoreTextGeneration({
+    operation: "asset_audio",
+    projectId: 1001,
+    targetId: 601,
+    model: "universalAi",
+  } as any, context, dependencies);
+  const assets = await executeCoreTextGeneration({
+    operation: "script_assets",
+    projectId: 1001,
+    targetId: 801,
+    model: "universalAi",
+  } as any, context, dependencies);
+  const regex = await executeCoreTextGeneration({
+    operation: "ai_regex",
+    projectId: 1001,
+    targetId: 1001,
+    model: "universalAi",
+    content: "第1集 标题",
+  } as any, context, dependencies);
+
+  assert.deepEqual(style.result, { prompt: "(画风：二维动画,2D animation)" });
+  assert.deepEqual(prompt.result, { assetId: 601, prompt: "polished hero" });
+  assert.deepEqual(audio.result, { assetId: 601, audioId: 603 });
+  assert.deepEqual(assets.result, { scriptId: 801, assetCount: 2 });
+  assert.deepEqual(regex.result, { regex: "/第\\s*(\\d+)集\\s*([^\\n]*)/g" });
+  assert.equal((await db("o_assets").where({ id: 601 }).first()).promptState, "已完成");
+  assert.equal((await db("o_assets").where({ id: 601 }).first()).prompt, "polished hero");
+  assert.equal((await db("o_assets").where({ id: 601 }).first()).audioBindState, "已完成");
+  assert.deepEqual(
+    await db("o_assetsRole2Audio").where({ assetsRoleId: 601 }).select("assetsAudioId"),
+    [{ assetsAudioId: 603 }],
+  );
+  const city = await db("o_assets").where({ projectId: 1001, name: "City" }).first();
+  assert.ok(city);
+  assert.equal((await db("o_script").where({ id: 801 }).first()).extractState, 1);
+  assert.equal(Number((await db("o_scriptAssets").where({ scriptId: 801 }).count({ count: "*" }).first())?.count), 2);
+  assert.equal(providerMarks.length, 5);
 }
 
 async function testTrustedHandlerContracts(): Promise<void> {
@@ -446,7 +565,90 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(Number((await db("o_novel").where({ eventState: 0 }).count({ count: "id" }).first())?.count), 2);
   await db("o_generationJob").whereIn("id", workflowJobs.map((item) => item.jobId)).del();
 
-  await db("o_assets").insert({ id: 601, projectId: 1001, type: "role", name: "hero", prompt: "red coat" });
+  await db("o_assets").insert([
+    { id: 601, projectId: 1001, type: "role", name: "hero", prompt: "red coat" },
+    { id: 603, projectId: 1001, type: "audio", name: "voice a" },
+  ]);
+  await db("o_script").insert([
+    { id: 801, projectId: 1001, name: "episode 1", content: "script secret 1", extractState: -1 },
+    { id: 802, projectId: 1001, name: "episode 2", content: "script secret 2", extractState: -1 },
+  ]);
+
+  const styleJobs = await enqueueStylePromptJobs(
+    creatorA,
+    { projectId: 1001, images: ["/oss/1001/style/a.jpg"] },
+    "request-style-1",
+    db,
+  );
+  const assetPromptJobs = await enqueueAssetPromptJobs(
+    creatorA,
+    { projectId: 1001, assetIds: [601], otherTextPrompt: "keep style" },
+    "request-asset-prompt-1",
+    db,
+  );
+  const audioJobs = await enqueueAssetAudioJobs(
+    creatorA,
+    { projectId: 1001, assetIds: [601] },
+    "request-audio-1",
+    db,
+  );
+  const scriptJobs = await enqueueScriptAssetJobs(
+    creatorA,
+    { projectId: 1001, scriptIds: [801, 802] },
+    "request-script-assets-1",
+    db,
+  );
+  const regexJobs = await enqueueAiRegexJobs(
+    creatorA,
+    { projectId: 1001, content: "第1集 标题" },
+    "request-regex-1",
+    db,
+  );
+  assert.deepEqual(
+    [styleJobs, assetPromptJobs, audioJobs, scriptJobs, regexJobs].map((jobs) => jobs.map((item) => ({ targetId: item.targetId, status: item.status }))),
+    [
+      [{ targetId: 1001, status: "queued" }],
+      [{ targetId: 601, status: "queued" }],
+      [{ targetId: 601, status: "queued" }],
+      [{ targetId: 801, status: "queued" }, { targetId: 802, status: "queued" }],
+      [{ targetId: 1001, status: "queued" }],
+    ],
+  );
+  assert.equal((await db("o_assets").where({ id: 601 }).first()).promptState, "生成中");
+  assert.equal((await db("o_assets").where({ id: 601 }).first()).audioBindState, "生成中");
+  assert.equal((await db("o_script").where({ id: 801 }).first()).extractState, 0);
+  const productionTextPayloads = await db("o_generationJob")
+    .whereIn("id", [
+      ...styleJobs,
+      ...assetPromptJobs,
+      ...audioJobs,
+      ...scriptJobs,
+      ...regexJobs,
+    ].map((item) => item.jobId))
+    .select("payloadJson");
+  assert.deepEqual(
+    productionTextPayloads.map((row) => JSON.parse(row.payloadJson).operation).sort(),
+    ["ai_regex", "asset_audio", "asset_prompt", "script_assets", "script_assets", "style_prompt"],
+  );
+  assert.equal(productionTextPayloads.some((row) => row.payloadJson.includes("script secret")), false);
+  assert.equal(productionTextPayloads.some((row) => row.payloadJson.includes('"name"')), false);
+  await assert.rejects(
+    enqueueStylePromptJobs(
+      creatorA,
+      { projectId: 1001, images: ["https://example.com/a.jpg"] },
+      "request-style-unsafe",
+      db,
+    ),
+    (error: any) => error?.code === "STYLE_IMAGE_INVALID",
+  );
+  await db("o_generationJob").whereIn("id", [
+    ...styleJobs,
+    ...assetPromptJobs,
+    ...audioJobs,
+    ...scriptJobs,
+    ...regexJobs,
+  ].map((item) => item.jobId)).del();
+
   const imageJob = await enqueueAssetImageJob(
     creatorA,
     {
@@ -1828,6 +2030,7 @@ async function main(): Promise<void> {
     );
     await testPolicyAuthorization(db);
     await testQueueAndAtomicClaim(db);
+    await testCoreProductionTextExecutors(db);
     await testCoreVideoPromptExecutor(db);
     await testGenerationJobSafetyContract(db);
     await testGetGenerationJobRouteHandler(db);

@@ -5,12 +5,16 @@ import type { Knex } from "knex";
 import u from "@/utils";
 import type { GenerationExecutionContext, GenerationExecutionResult } from "@/types/generationQueue";
 import type { TextGenerationPayload } from "@/jobs/handlers/textGeneration";
+import { jsonSchema, tool } from "ai";
+import { z } from "zod";
 
 type ExecutorConnection = Knex | Knex.Transaction;
 
 interface TextInvocationInput {
   system?: string;
-  messages: Array<{ role: "assistant" | "user"; content: string }>;
+  messages: any[];
+  tools?: Record<string, any>;
+  abortSignal?: AbortSignal;
 }
 
 export interface CoreTextExecutorDependencies {
@@ -18,7 +22,8 @@ export interface CoreTextExecutorDependencies {
   getPath?: (segments: string[]) => string;
   readFile?: (filePath: string) => Promise<string>;
   getArtPrompt?: (styleName: string, source: string, fileName: string) => string;
-  invokeText?: (model: "universalAi", input: TextInvocationInput) => Promise<{ text: string }>;
+  getImageBase64?: (path: string) => Promise<string>;
+  invokeText?: (model: "universalAi", input: TextInvocationInput) => Promise<{ text: string; _output?: string }>;
 }
 
 function unknownCostMetering(modelId: string) {
@@ -59,6 +64,211 @@ async function tryReadTemplate(
 
 function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+async function markProviderSubmission(context: GenerationExecutionContext, operation: string) {
+  await context.setProviderRequestId(`${operation}:${context.jobId}`);
+}
+
+async function executeStylePrompt(
+  payload: Extract<TextGenerationPayload, { operation: "style_prompt" }>,
+  context: GenerationExecutionContext,
+  dependencies: Required<CoreTextExecutorDependencies>,
+): Promise<GenerationExecutionResult<unknown>> {
+  const project = await dependencies.connection("o_project").where({ id: payload.projectId }).select("id").first();
+  if (!project) throw new Error("项目不存在");
+  const images = await Promise.all(payload.images.map(async (image) => ({
+    type: "image" as const,
+    image: await dependencies.getImageBase64(image.slice(4).replace("/smallImage", "")),
+  })));
+  await markProviderSubmission(context, payload.operation);
+  const response = await dependencies.invokeText("universalAi", {
+    system: "请根据图片提取一个综合画风提示词。仅输出包含中英文描述且带有‘画风’二字的括号内容。",
+    messages: [{ role: "user", content: images }],
+    abortSignal: context.signal,
+  });
+  const prompt = response.text?.trim();
+  if (!prompt) throw new Error("画风分析未返回结果");
+  return { result: { prompt }, metering: unknownCostMetering(payload.model) };
+}
+
+const assetPromptConfig = {
+  role: { label: "角色", manual: "art_character", derivativeManual: "art_character_derivative" },
+  scene: { label: "场景", manual: "art_scene", derivativeManual: "art_scene_derivative" },
+  tool: { label: "道具", manual: "art_prop", derivativeManual: "art_prop_derivative" },
+} as const;
+
+async function executeAssetPrompt(
+  payload: Extract<TextGenerationPayload, { operation: "asset_prompt" }>,
+  context: GenerationExecutionContext,
+  dependencies: Required<CoreTextExecutorDependencies>,
+): Promise<GenerationExecutionResult<unknown>> {
+  const { connection } = dependencies;
+  const [project, asset] = await Promise.all([
+    connection("o_project").where({ id: payload.projectId }).select("artStyle").first(),
+    connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).first(),
+  ]);
+  if (!project || !asset) throw new Error("资产不存在或不属于当前项目");
+  const config = assetPromptConfig[asset.type as keyof typeof assetPromptConfig];
+  if (!config) throw new Error("不支持的资产类型");
+  const manualName = asset.assetsId ? config.derivativeManual : config.manual;
+  const visualManual = dependencies.getArtPrompt(String(project.artStyle || "无"), "art_skills", manualName);
+  if (!visualManual) throw new Error("视觉手册未定义");
+  try {
+    await markProviderSubmission(context, payload.operation);
+    const response = await dependencies.invokeText("universalAi", {
+      system: `${visualManual}\n${payload.otherTextPrompt}`,
+      messages: [{
+        role: "user",
+        content: `${config.label}名称:${asset.name || "未命名"}\n${config.label}描述:${asset.describe || ""}`,
+      }],
+      abortSignal: context.signal,
+    });
+    const prompt = (response._output || response.text || "").trim();
+    if (!prompt) throw new Error("资产提示词生成未返回结果");
+    await connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({
+      prompt,
+      promptState: "已完成",
+      promptErrorReason: null,
+    });
+    return { result: { assetId: payload.targetId, prompt }, metering: unknownCostMetering(payload.model) };
+  } catch (cause) {
+    await connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({
+      promptState: "生成失败",
+      promptErrorReason: errorMessage(cause).slice(0, 500),
+    });
+    throw cause;
+  }
+}
+
+async function executeAssetAudio(
+  payload: Extract<TextGenerationPayload, { operation: "asset_audio" }>,
+  context: GenerationExecutionContext,
+  dependencies: Required<CoreTextExecutorDependencies>,
+): Promise<GenerationExecutionResult<unknown>> {
+  const { connection } = dependencies;
+  const [asset, audioRows, promptRow] = await Promise.all([
+    connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).first(),
+    connection("o_assets").where({ projectId: payload.projectId, type: "audio" }).whereNull("assetsId").select("id", "name", "describe"),
+    connection("o_prompt").where({ type: "audioBindPrompt" }).first(),
+  ]);
+  if (!asset) throw new Error("资产不存在或不属于当前项目");
+  if (audioRows.length === 0) throw new Error("暂无可匹配的音频");
+  let selectedAudioId: number | null = null;
+  const resultTool = tool({
+    description: "提交匹配的音频 ID",
+    inputSchema: jsonSchema(z.object({ audioId: z.number().int().positive().nullable() }).toJSONSchema()),
+    execute: async (result: any) => {
+      selectedAudioId = result.audioId == null ? null : Number(result.audioId);
+      return "已记录";
+    },
+  });
+  try {
+    const audioList = audioRows.map((item: any) => `ID:${item.id} 名称:${item.name} 描述:${item.describe || "无"}`).join("\n");
+    await markProviderSubmission(context, payload.operation);
+    await dependencies.invokeText("universalAi", {
+      messages: [
+        { role: "system", content: promptRow?.useData || promptRow?.data || "匹配最合适的音频" },
+        { role: "user", content: `候选音频列表\n${audioList}\n待匹配资产：${asset.name || "未命名"} ${asset.describe || ""}` },
+      ],
+      tools: { resultTool },
+      abortSignal: context.signal,
+    });
+    if (selectedAudioId !== null && !audioRows.some((item: any) => Number(item.id) === selectedAudioId)) {
+      throw new Error("模型返回了无效的音频 ID");
+    }
+    await connection.transaction(async (trx: Knex.Transaction) => {
+      await trx("o_assetsRole2Audio").where({ assetsRoleId: payload.targetId }).delete();
+      if (selectedAudioId !== null) {
+        await trx("o_assetsRole2Audio").insert({ assetsRoleId: payload.targetId, assetsAudioId: selectedAudioId });
+      }
+      await trx("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({ audioBindState: "已完成" });
+    });
+    return { result: { assetId: payload.targetId, audioId: selectedAudioId }, metering: unknownCostMetering(payload.model) };
+  } catch (cause) {
+    await connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({ audioBindState: "生成失败" });
+    throw cause;
+  }
+}
+
+const newAssetSchema = z.object({ name: z.string(), desc: z.string(), type: z.enum(["role", "tool", "scene"]), scriptIds: z.array(z.number()) });
+const existingAssetSchema = z.object({ name: z.string(), scriptIds: z.array(z.number()) });
+
+async function executeScriptAssets(
+  payload: Extract<TextGenerationPayload, { operation: "script_assets" }>,
+  context: GenerationExecutionContext,
+  dependencies: Required<CoreTextExecutorDependencies>,
+): Promise<GenerationExecutionResult<unknown>> {
+  const { connection } = dependencies;
+  const [script, existingAssets, promptRow] = await Promise.all([
+    connection("o_script").where({ id: payload.targetId, projectId: payload.projectId }).first(),
+    connection("o_assets").where({ projectId: payload.projectId }).select("id", "name", "type"),
+    connection("o_prompt").where({ type: "scriptAssetExtraction" }).first(),
+  ]);
+  if (!script) throw new Error("剧本不存在或不属于当前项目");
+  let newAssets: Array<z.infer<typeof newAssetSchema>> = [];
+  let existingRefs: Array<z.infer<typeof existingAssetSchema>> = [];
+  const resultTool = tool({
+    description: "提交剧本资产提取结果",
+    inputSchema: jsonSchema(z.object({
+      newAssets: z.array(newAssetSchema),
+      existingAssetRefs: z.array(existingAssetSchema),
+    }).toJSONSchema()),
+    execute: async (result: any) => {
+      newAssets = result.newAssets || [];
+      existingRefs = result.existingAssetRefs || [];
+      return "已记录";
+    },
+  });
+  try {
+    const existingList = existingAssets.map((asset: any) => `${asset.name}(${asset.type})`).join("、");
+    await markProviderSubmission(context, payload.operation);
+    await dependencies.invokeText("universalAi", {
+      messages: [
+        { role: "system", content: promptRow?.useData || promptRow?.data || "提取角色、场景和道具，并调用工具提交" },
+        { role: "user", content: `已有资产：${existingList}\n剧本：${script.content || ""}` },
+      ],
+      tools: { resultTool },
+      abortSignal: context.signal,
+    });
+    if (newAssets.length === 0 && existingRefs.length === 0) throw new Error("AI 未返回任何资产");
+
+    let assetCount = 0;
+    await connection.transaction(async (trx: Knex.Transaction) => {
+      const before = await trx("o_assets").where({ projectId: payload.projectId }).select("id", "name");
+      const existingNames = new Set(before.map((asset: any) => String(asset.name)));
+      const inserts = newAssets
+        .filter((asset) => !existingNames.has(asset.name))
+        .map((asset) => ({ name: asset.name, type: asset.type, describe: asset.desc, projectId: payload.projectId, startTime: Date.now() }));
+      if (inserts.length > 0) await trx("o_assets").insert(inserts);
+      const allAssets = await trx("o_assets").where({ projectId: payload.projectId }).select("id", "name");
+      const byName = new Map(allAssets.map((asset: any) => [String(asset.name), Number(asset.id)]));
+      const names = [...new Set([...newAssets.map((asset) => asset.name), ...existingRefs.map((asset) => asset.name)])];
+      const rows = names.map((name) => byName.get(name)).filter((id): id is number => id !== undefined).map((assetId) => ({ scriptId: payload.targetId, assetId }));
+      await trx("o_scriptAssets").where({ scriptId: payload.targetId }).delete();
+      if (rows.length > 0) await trx("o_scriptAssets").insert(rows);
+      await trx("o_script").where({ id: payload.targetId, projectId: payload.projectId }).update({ extractState: 1, errorReason: null });
+      assetCount = rows.length;
+    });
+    return { result: { scriptId: payload.targetId, assetCount }, metering: unknownCostMetering(payload.model) };
+  } catch (cause) {
+    await connection("o_script").where({ id: payload.targetId, projectId: payload.projectId }).update({ extractState: -1, errorReason: errorMessage(cause).slice(0, 500) });
+    throw cause;
+  }
+}
+
+async function executeAiRegex(
+  payload: Extract<TextGenerationPayload, { operation: "ai_regex" }>,
+  context: GenerationExecutionContext,
+  dependencies: Required<CoreTextExecutorDependencies>,
+): Promise<GenerationExecutionResult<unknown>> {
+  await markProviderSubmission(context, payload.operation);
+  const response = await dependencies.invokeText("universalAi", {
+    system: "你是一个正则表达式专家。分析剧本集数与标题分隔模式，只返回带 g 标志且包含编号和标题两个捕获组的 JavaScript 正则表达式；无明显模式返回空字符串。",
+    messages: [{ role: "user", content: payload.content }],
+    abortSignal: context.signal,
+  });
+  return { result: { regex: (response.text || "").trim() }, metering: unknownCostMetering(payload.model) };
 }
 
 async function executeNovelEvents(
@@ -233,10 +443,16 @@ export async function executeCoreTextGeneration(
     getPath: overrides.getPath ?? ((segments) => u.getPath(segments)),
     readFile: overrides.readFile ?? ((filePath) => fs.readFile(filePath, "utf-8")),
     getArtPrompt: overrides.getArtPrompt ?? ((styleName, source, fileName) => u.getArtPrompt(styleName, source, fileName)),
-    invokeText: overrides.invokeText ?? ((model, input) => u.Ai.Text(model).invoke(input)),
+    getImageBase64: overrides.getImageBase64 ?? ((imagePath) => u.oss.getImageBase64(imagePath)),
+    invokeText: overrides.invokeText ?? ((model, input) => u.Ai.Text(model).invoke(input as any)),
   };
 
   if (payload.operation === "novel_events") return executeNovelEvents(payload, dependencies.connection);
   if (payload.operation === "video_prompt") return executeVideoPrompt(payload, context, dependencies);
+  if (payload.operation === "style_prompt") return executeStylePrompt(payload, context, dependencies);
+  if (payload.operation === "asset_prompt") return executeAssetPrompt(payload, context, dependencies);
+  if (payload.operation === "asset_audio") return executeAssetAudio(payload, context, dependencies);
+  if (payload.operation === "script_assets") return executeScriptAssets(payload, context, dependencies);
+  if (payload.operation === "ai_regex") return executeAiRegex(payload, context, dependencies);
   throw new Error(`尚未接入的文本任务类型: ${payload.operation}`);
 }

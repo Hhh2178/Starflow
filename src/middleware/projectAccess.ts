@@ -112,6 +112,15 @@ const superAdminOnlyGlobalMutations = new Set([
   "/api/project/editVisualManual",
 ]);
 
+const projectScopedQueueRoutes = new Set([
+  "/api/artStyle/extractStylePrompt",
+  "/api/assetsGenerate/polishAssetsPrompt",
+  "/api/assetsGenerate/batchPolishAssetsPrompt",
+  "/api/cornerScape/batchBindAudio",
+  "/api/script/extractAssets",
+  "/api/script/getAiRegex",
+]);
+
 function nestedResourceReferences(path: string, body: any): Array<{ kind: ResourceKind; id: number }> {
   const references: Array<{ kind: ResourceKind; id: number }> = [];
   const add = (kind: ResourceKind, values: unknown[]) => {
@@ -151,6 +160,10 @@ export const requireScopedProductionAccess: RequestHandler = async (req, res, ne
   }
   const body = req.body ?? {};
   const resolvedProjectIds: number[] = [];
+
+  if (projectScopedQueueRoutes.has(req.path) && body.projectId === undefined) {
+    return sendAccessRejection(req, res, "项目不存在或当前账号无权访问", "PROJECT_ID_REQUIRED");
+  }
 
   if (body.projectId !== undefined && body.projectId !== null) {
     const projectId = Number(body.projectId);

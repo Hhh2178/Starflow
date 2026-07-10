@@ -23,7 +23,7 @@ import type { GenerationJobHandler } from "@/types/generationQueue";
 import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
-import { enqueueNovelEventJobs } from "@/services/generationWorkflows";
+import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs } from "@/services/generationWorkflows";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -267,6 +267,45 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(workflowPayloads.every((row) => !row.payloadJson.includes("chapter secret")), true);
   assert.equal(Number((await db("o_novel").where({ eventState: 0 }).count({ count: "id" }).first())?.count), 2);
   await db("o_generationJob").whereIn("id", workflowJobs.map((item) => item.jobId)).del();
+
+  await db("o_assets").insert({ id: 601, projectId: 1001, type: "role", name: "hero", prompt: "red coat" });
+  const imageJob = await enqueueAssetImageJob(
+    creatorA,
+    {
+      projectId: 1001,
+      assetId: 601,
+      model: "1:image-model",
+      size: "1K",
+      referenceResourceIds: [],
+    },
+    "request-image-1",
+    db,
+  );
+  assert.deepEqual({ targetId: imageJob.targetId, status: imageJob.status }, { targetId: 601, status: "queued" });
+  const imagePayload = JSON.parse((await db("o_generationJob").where({ id: imageJob.jobId }).first()).payloadJson);
+  assert.equal(imagePayload.operation, "asset");
+  assert.equal(imagePayload.targetId, imageJob.imageId);
+  assert.equal("base64" in imagePayload, false);
+  assert.equal((await db("o_image").where({ id: imageJob.imageId }).first()).state, "生成中");
+  await db("o_generationJob").where({ id: imageJob.jobId }).del();
+
+  await db("o_project").where({ id: 1001 }).update({ imageModel: "1:image-model", imageQuality: "1K", videoRatio: "16:9" });
+  await db("o_storyboard").insert({ id: 701, projectId: 1001, scriptId: 801, prompt: "wide shot", shouldGenerateImage: 1 });
+  const storyboardJobs = await enqueueStoryboardImageJobs(
+    creatorA,
+    { projectId: 1001, scriptId: 801, storyboardIds: [701], compulsory: false },
+    "request-storyboard-1",
+    db,
+  );
+  assert.deepEqual(storyboardJobs.map((item) => ({ targetId: item.targetId, status: item.status })), [
+    { targetId: 701, status: "queued" },
+  ]);
+  const storyboardPayload = JSON.parse((await db("o_generationJob").where({ id: storyboardJobs[0].jobId }).first()).payloadJson);
+  assert.deepEqual(
+    { operation: storyboardPayload.operation, targetId: storyboardPayload.targetId, referenceResourceIds: storyboardPayload.referenceResourceIds },
+    { operation: "storyboard", targetId: 701, referenceResourceIds: [] },
+  );
+  await db("o_generationJob").where({ id: storyboardJobs[0].jobId }).del();
 
   for (const payload of [
     { providerKey: "secret" },

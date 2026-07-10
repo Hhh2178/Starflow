@@ -42,6 +42,7 @@ async function main() {
   const temporaryPassword = "TempPass123";
   const replacementPassword = "NextPass123";
   let baseUrl = "";
+  let adminGroupId: number | null = null;
 
   try {
     const port = await startServe(true);
@@ -54,17 +55,6 @@ async function main() {
     assert.equal("password" in me.body.data, false);
     assert.equal("passwordHash" in me.body.data, false);
 
-    const createCreator = await request(baseUrl, "/api/setting/userManagement/createUser", superAdminToken, {
-      method: "POST",
-      body: JSON.stringify({
-        name: creatorName,
-        password: temporaryPassword,
-        role: "creator",
-      }),
-    });
-    assert.equal(createCreator.status, 200);
-    const creatorId = Number(createCreator.body.data.id);
-
     const createAdmin = await request(baseUrl, "/api/setting/userManagement/createUser", superAdminToken, {
       method: "POST",
       body: JSON.stringify({
@@ -74,6 +64,20 @@ async function main() {
       }),
     });
     assert.equal(createAdmin.status, 200);
+    adminGroupId = Number(createAdmin.body.data.groupId);
+    assert.ok(adminGroupId > 0);
+
+    const createCreator = await request(baseUrl, "/api/setting/userManagement/createUser", superAdminToken, {
+      method: "POST",
+      body: JSON.stringify({
+        name: creatorName,
+        password: temporaryPassword,
+        role: "creator",
+        groupId: adminGroupId,
+      }),
+    });
+    assert.equal(createCreator.status, 200);
+    const creatorId = Number(createCreator.body.data.id);
 
     const storedCreator = await u.db("o_user").where("id", creatorId).first();
     if (!storedCreator) throw new Error("created user was not persisted");
@@ -142,6 +146,7 @@ async function main() {
     assert.equal(disabledLogin.status, 403);
   } finally {
     await u.db("o_user").whereIn("name", [creatorName, renamedCreatorName, adminName, forbiddenAdminName]).delete();
+    if (adminGroupId !== null) await u.db("o_group").where("id", adminGroupId).delete();
     if (baseUrl) await closeServe();
   }
 }

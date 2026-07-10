@@ -5,6 +5,7 @@ export interface SafeUser {
   name: string;
   role: UserRole;
   status: UserStatus;
+  groupId: number | null;
   mustChangePassword: boolean;
   createdAt: number | null;
   updatedAt: number | null;
@@ -16,6 +17,7 @@ export const SAFE_USER_COLUMNS = [
   "name",
   "role",
   "status",
+  "groupId",
   "mustChangePassword",
   "createdAt",
   "updatedAt",
@@ -28,6 +30,7 @@ export function toSafeUser(user: any): SafeUser {
     name: String(user.name || ""),
     role: normalizeRole(user.role, Number(user.id) === 1 ? "super_admin" : "creator"),
     status: normalizeStatus(user.status),
+    groupId: user.groupId == null ? null : Number(user.groupId),
     mustChangePassword: Boolean(user.mustChangePassword),
     createdAt: user.createdAt == null ? null : Number(user.createdAt),
     updatedAt: user.updatedAt == null ? null : Number(user.updatedAt),
@@ -40,5 +43,8 @@ export function canAssignRole(actor: AuthUser, role: UserRole): boolean {
 }
 
 export function canManageUser(actor: AuthUser, target: SafeUser): boolean {
-  return actor.role === "super_admin" || (actor.role === "admin" && target.role === "creator");
+  return (
+    actor.role === "super_admin" ||
+    (actor.role === "admin" && target.role === "creator" && actor.groupId !== null && target.groupId === actor.groupId)
+  );
 }

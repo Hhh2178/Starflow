@@ -271,16 +271,21 @@ async function testAdminSession(): Promise<void> {
   const adminName = `r3a-admin-${suffix}`;
   const creatorName = `r3a-creator-${suffix}`;
   const orphanName = `r3a-orphan-${suffix}`;
+  const adminBName = `r3a-admin-b-${suffix}`;
+  const creatorBName = `r3a-creator-b-${suffix}`;
+  const createdCreatorNames = Array.from({ length: 5 }, (_, index) => `r3a-created-${index}-${suffix}`);
+  const forbiddenAdminName = `r3a-forbidden-${suffix}`;
   const password = "TempPass123";
   const now = Date.now();
   let baseUrl = "";
   let groupId: number | null = null;
+  let groupBId: number | null = null;
   let userIds: number[] = [];
 
   try {
     const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
     const firstUserId = Number(maxUser?.maxId ?? 0) + 1;
-    userIds = [firstUserId, firstUserId + 1, firstUserId + 2];
+    userIds = [firstUserId, firstUserId + 1, firstUserId + 2, firstUserId + 3, firstUserId + 4];
     const [createdGroupId] = await u.db("o_group").insert({
       name: `R3A ${suffix}`,
       adminUserId: userIds[0],
@@ -290,6 +295,15 @@ async function testAdminSession(): Promise<void> {
       updatedAt: now,
     });
     groupId = Number(createdGroupId);
+    const [createdGroupBId] = await u.db("o_group").insert({
+      name: `R3A B ${suffix}`,
+      adminUserId: userIds[3],
+      creatorLimit: 5,
+      status: "enabled",
+      createdAt: now,
+      updatedAt: now,
+    });
+    groupBId = Number(createdGroupBId);
     await u.db("o_user").insert([
       {
         id: userIds[0],
@@ -309,6 +323,28 @@ async function testAdminSession(): Promise<void> {
         role: "creator",
         status: "enabled",
         groupId,
+        createdAt: now,
+        updatedAt: now,
+        mustChangePassword: false,
+      },
+      {
+        id: userIds[3],
+        name: adminBName,
+        passwordHash: hashPassword(password),
+        role: "admin",
+        status: "enabled",
+        groupId: groupBId,
+        createdAt: now,
+        updatedAt: now,
+        mustChangePassword: false,
+      },
+      {
+        id: userIds[4],
+        name: creatorBName,
+        passwordHash: hashPassword(password),
+        role: "creator",
+        status: "enabled",
+        groupId: groupBId,
         createdAt: now,
         updatedAt: now,
         mustChangePassword: false,
@@ -344,10 +380,85 @@ async function testAdminSession(): Promise<void> {
     const orphanSession = await request(baseUrl, "/api/setting/loginConfig/me", orphanToken);
     assert.equal(orphanSession.status, 403);
     assert.match(orphanSession.body.message, /尚未分配分组/);
+
+    for (const name of createdCreatorNames.slice(0, 4)) {
+      const created = await request(baseUrl, "/api/admin/users/createUser", adminToken, {
+        method: "POST",
+        body: JSON.stringify({ name, password, role: "creator" }),
+      });
+      assert.equal(created.status, 200);
+      assert.equal(created.body.data.groupId, groupId);
+    }
+    const overLimit = await request(baseUrl, "/api/admin/users/createUser", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ name: createdCreatorNames[4], password, role: "creator" }),
+    });
+    assert.equal(overLimit.status, 409);
+
+    const adminUsers = await request(baseUrl, "/api/admin/users/listUsers", adminToken);
+    assert.equal(adminUsers.status, 200);
+    assert.equal(adminUsers.body.data.length, 5);
+    assert.ok(adminUsers.body.data.every((user: any) => user.role === "creator" && user.groupId === groupId));
+    assert.equal(adminUsers.body.data.some((user: any) => user.id === userIds[3] || user.id === userIds[4]), false);
+
+    const crossGroupUpdate = await request(baseUrl, "/api/admin/users/updateUser", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ id: userIds[4], status: "disabled" }),
+    });
+    assert.equal(crossGroupUpdate.status, 404);
+    const crossGroupReset = await request(baseUrl, "/api/admin/users/resetPassword", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ id: userIds[4], password: "ResetPass123" }),
+    });
+    assert.equal(crossGroupReset.status, 404);
+
+    const adminGroups = await request(baseUrl, "/api/admin/groups/listGroups", adminToken);
+    assert.equal(adminGroups.status, 403);
+
+    const adminCreateAdmin = await request(baseUrl, "/api/admin/users/createUser", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ name: forbiddenAdminName, password, role: "admin" }),
+    });
+    assert.equal(adminCreateAdmin.status, 403);
+
+    const superAdminToken = await login(baseUrl, "admin", "admin123");
+    const changeRoleWithoutRebinding = await request(baseUrl, "/api/admin/users/updateUser", superAdminToken, {
+      method: "POST",
+      body: JSON.stringify({ id: userIds[4], role: "admin" }),
+    });
+    assert.equal(changeRoleWithoutRebinding.status, 409);
+    assert.equal((await u.db("o_user").where("id", userIds[4]).select("role").first())?.role, "creator");
+
+    const swapGroupAdmins = await request(baseUrl, "/api/admin/groups/updateGroup", superAdminToken, {
+      method: "POST",
+      body: JSON.stringify({ id: groupId, adminUserId: userIds[3] }),
+    });
+    assert.equal(swapGroupAdmins.status, 200);
+    assert.equal((await u.db("o_group").where("id", groupId).select("adminUserId").first())?.adminUserId, userIds[3]);
+    assert.equal((await u.db("o_group").where("id", groupBId).select("adminUserId").first())?.adminUserId, userIds[0]);
+    assert.equal((await u.db("o_user").where("id", userIds[0]).select("groupId").first())?.groupId, groupBId);
+    assert.equal((await u.db("o_user").where("id", userIds[3]).select("groupId").first())?.groupId, groupId);
+
+    await u.db("o_group").where("id", groupBId).update({ creatorLimit: 1 });
+    const moveIntoFullGroup = await request(baseUrl, "/api/admin/users/updateUser", superAdminToken, {
+      method: "POST",
+      body: JSON.stringify({ id: userIds[1], groupId: groupBId }),
+    });
+    assert.equal(moveIntoFullGroup.status, 409);
+    const creatorAfterRejectedMove = await u.db("o_user").where("id", userIds[1]).select("groupId").first();
+    assert.ok(creatorAfterRejectedMove);
+    assert.equal(creatorAfterRejectedMove.groupId, groupId);
+
+    const allGroups = await request(baseUrl, "/api/admin/groups/listGroups", superAdminToken);
+    assert.equal(allGroups.status, 200);
+    assert.ok(allGroups.body.data.some((group: any) => group.id === groupId));
+    assert.ok(allGroups.body.data.some((group: any) => group.id === groupBId));
   } finally {
     if (baseUrl) await closeServe();
+    await u.db("o_user").whereIn("name", [...createdCreatorNames, forbiddenAdminName]).delete();
     if (userIds.length) await u.db("o_user").whereIn("id", userIds).delete();
     if (groupId !== null) await u.db("o_group").where("id", groupId).delete();
+    if (groupBId !== null) await u.db("o_group").where("id", groupBId).delete();
   }
 }
 

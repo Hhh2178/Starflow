@@ -6,6 +6,7 @@ import {
   ConcurrencyPolicyError,
   evaluateCapacity,
   getEffectivePolicies,
+  getScopedEffectivePolicies,
   updateGroupPolicy,
   updateUserPolicy,
 } from "@/services/concurrencyPolicy";
@@ -14,6 +15,7 @@ import {
   cancelGenerationJob,
   enqueueGeneration,
   GenerationQueueError,
+  listGenerationJobs,
   reprioritizeGenerationJob,
 } from "@/services/generationQueue";
 import { chooseFairCandidate, claimNextJob } from "@/services/generationScheduler";
@@ -25,6 +27,7 @@ import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
+import { getQuotaOverview, QuotaManagementError } from "@/services/quotaManagement";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -184,8 +187,10 @@ async function testPolicyAuthorization(db: ReturnType<typeof knex>): Promise<voi
   const creatorLimit = { total: 3, text: 2, image: 2, video: 1 };
   assert.deepEqual(await updateUserPolicy(adminA, 3, creatorLimit, db), creatorLimit);
   assert.deepEqual(await getEffectivePolicies(101, 3, db), { group: validGroupLimit, user: creatorLimit });
+  assert.deepEqual(await getScopedEffectivePolicies(adminA, 101, 3, db), { group: validGroupLimit, user: creatorLimit });
 
   await expectPolicyError(updateUserPolicy(adminA, 2, defaultUserLimit, db), 404, "USER_NOT_FOUND");
+  await expectPolicyError(getScopedEffectivePolicies(adminA, 101, 2, db), 404, "USER_NOT_FOUND");
   await expectPolicyError(updateUserPolicy(adminA, 4, defaultUserLimit, db), 404, "USER_NOT_FOUND");
   await expectPolicyError(updateUserPolicy(creatorA, 3, defaultUserLimit, db), 403, "ADMIN_REQUIRED");
   await expectPolicyError(
@@ -700,6 +705,30 @@ async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(Number((await db("o_quotaAccount").where({ groupId: 101 }).first()).balance), 87.5);
   assert.equal(unknownUsage.estimatedCost, null);
   assert.equal(Number((await db("o_quotaLedger").where({ usageLedgerId: unknownUsage.id }).count({ count: "id" }).first())?.count), 0);
+
+  await db("o_generationJob").insert({
+    ...baseJob,
+    groupId: 102,
+    ownerUserId: 4,
+    projectId: 1002,
+    status: "queued",
+    idempotencyKey: "other-group-list",
+  });
+  const adminList = await listGenerationJobs({ id: 2, name: "admin-a", role: "admin", groupId: 101 }, {}, db);
+  assert.equal(adminList.items.every((item) => item.groupId === 101), true);
+  assert.equal(adminList.items.every((item) => !("payloadJson" in item)), true);
+  const superList = await listGenerationJobs({ id: 1, name: "root", role: "super_admin", groupId: null }, {}, db);
+  assert.equal(superList.items.some((item) => item.groupId === 102), true);
+  const quotaOverview = await getQuotaOverview({ id: 1, name: "root", role: "super_admin", groupId: null }, db);
+  const groupQuota = quotaOverview.groups.find((group) => group.groupId === 101)!;
+  assert.equal(groupQuota.balance, 87.5);
+  assert.equal(groupQuota.totalRecharge, 0);
+  assert.equal(groupQuota.totalUsage, 12.5);
+  assert.equal(quotaOverview.logs.some((log) => log.usageLedgerId === knownUsage.id), true);
+  await assert.rejects(
+    getQuotaOverview({ id: 2, name: "admin-a", role: "admin", groupId: 101 }, db),
+    (error: unknown) => error instanceof QuotaManagementError && error.status === 403,
+  );
 }
 
 async function main(): Promise<void> {

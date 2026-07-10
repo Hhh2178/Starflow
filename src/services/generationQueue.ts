@@ -28,6 +28,27 @@ export interface GenerationJobRecord {
   finishedAt: number | null;
 }
 
+export interface GenerationJobListItem {
+  id: number;
+  groupId: number;
+  ownerUserId: number;
+  projectId: number | null;
+  taskType: GenerationTaskType;
+  status: GenerationJobStatus;
+  priority: number;
+  queuePosition: number | null;
+  queuedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  errorMessage: string | null;
+}
+
+export interface GenerationJobListFilters {
+  status?: GenerationJobStatus;
+  taskType?: GenerationTaskType;
+  ownerUserId?: number;
+}
+
 export class GenerationQueueError extends Error {
   constructor(
     public readonly status: number,
@@ -203,4 +224,74 @@ export async function reprioritizeGenerationJob(
     });
     return toJobRecord(await trx("o_generationJob").where({ id: jobId }).first());
   });
+}
+
+export async function listGenerationJobs(
+  actor: AuthUser,
+  filters: GenerationJobListFilters = {},
+  connection?: QueueConnection,
+): Promise<{ items: GenerationJobListItem[]; counts: Record<GenerationJobStatus, number> }> {
+  const resolvedConnection = await resolveConnection(connection);
+  const applyFilters = (query: Knex.QueryBuilder) => {
+    let filtered = applyJobScope(query, actor);
+    if (filters.taskType) filtered = filtered.where("taskType", filters.taskType);
+    if (filters.ownerUserId !== undefined) filtered = filtered.where("ownerUserId", filters.ownerUserId);
+    return filtered;
+  };
+  let itemQuery = applyFilters(resolvedConnection("o_generationJob"));
+  if (filters.status) itemQuery = itemQuery.where("status", filters.status);
+  const rows = await itemQuery.orderBy("queuedAt", "desc").orderBy("id", "desc").limit(200).select(
+    "id",
+    "groupId",
+    "ownerUserId",
+    "projectId",
+    "taskType",
+    "status",
+    "priority",
+    "queuedAt",
+    "startedAt",
+    "finishedAt",
+    "errorMessage",
+  );
+  const queuedRows = await applyFilters(resolvedConnection("o_generationJob"))
+    .where({ status: "queued" })
+    .orderBy("groupId", "asc")
+    .orderBy("priority", "desc")
+    .orderBy("queuedAt", "asc")
+    .orderBy("id", "asc")
+    .select("id", "groupId");
+  const positions = new Map<number, number>();
+  const groupPositions = new Map<number, number>();
+  for (const row of queuedRows) {
+    const groupId = Number(row.groupId);
+    const position = (groupPositions.get(groupId) ?? 0) + 1;
+    groupPositions.set(groupId, position);
+    positions.set(Number(row.id), position);
+  }
+
+  const statuses: GenerationJobStatus[] = ["queued", "running", "recovering", "needs_attention", "succeeded", "failed", "cancelled"];
+  const counts = Object.fromEntries(statuses.map((status) => [status, 0])) as Record<GenerationJobStatus, number>;
+  const countRows = await applyFilters(resolvedConnection("o_generationJob"))
+    .select("status")
+    .count({ count: "id" })
+    .groupBy("status") as Array<{ status: GenerationJobStatus; count: number | string }>;
+  for (const row of countRows) counts[row.status] = Number(row.count);
+
+  return {
+    items: rows.map((row: any) => ({
+      id: Number(row.id),
+      groupId: Number(row.groupId),
+      ownerUserId: Number(row.ownerUserId),
+      projectId: row.projectId == null ? null : Number(row.projectId),
+      taskType: row.taskType,
+      status: row.status,
+      priority: Number(row.priority),
+      queuePosition: row.status === "queued" ? positions.get(Number(row.id)) ?? null : null,
+      queuedAt: Number(row.queuedAt),
+      startedAt: row.startedAt == null ? null : Number(row.startedAt),
+      finishedAt: row.finishedAt == null ? null : Number(row.finishedAt),
+      errorMessage: row.errorMessage == null ? null : String(row.errorMessage),
+    })),
+    counts,
+  };
 }

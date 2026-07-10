@@ -163,3 +163,22 @@ export async function getEffectivePolicies(
   ]);
   return { group, user: userPolicy };
 }
+
+export async function getScopedEffectivePolicies(
+  actor: AuthUser,
+  groupId: number,
+  userId: number,
+  connection?: PolicyConnection,
+): Promise<{ group: ConcurrencyLimit; user: ConcurrencyLimit }> {
+  if (actor.role === "creator") {
+    throw new ConcurrencyPolicyError(403, "ADMIN_REQUIRED", "仅管理员可以查看并发策略");
+  }
+  const resolvedConnection = await resolveConnection(connection);
+  if (actor.role === "admin") {
+    const target = groupId === actor.groupId
+      ? await resolvedConnection("o_user").where({ id: userId, groupId, role: "creator" }).first()
+      : undefined;
+    if (!target) throw new ConcurrencyPolicyError(404, "USER_NOT_FOUND", "用户不存在");
+  }
+  return getEffectivePolicies(groupId, userId, resolvedConnection);
+}

@@ -21,6 +21,7 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.text("passwordHash");
         table.text("role").notNullable().defaultTo("creator");
         table.text("status").notNullable().defaultTo("enabled");
+        table.integer("groupId");
         table.integer("createdAt");
         table.integer("updatedAt");
         table.integer("lastLoginAt");
@@ -45,6 +46,36 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         ]);
       },
     },
+    // 分组表
+    {
+      name: "o_group",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.text("name").notNullable();
+        table.integer("adminUserId").unique();
+        table.integer("creatorLimit").notNullable().defaultTo(5);
+        table.text("status").notNullable().defaultTo("enabled");
+        table.integer("createdAt").notNullable();
+        table.integer("updatedAt").notNullable();
+      },
+    },
+    // 审计日志表
+    {
+      name: "o_auditLog",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("actorUserId").notNullable();
+        table.text("actorRole").notNullable();
+        table.integer("groupId");
+        table.text("action").notNullable();
+        table.text("targetType").notNullable();
+        table.text("targetId");
+        table.text("summaryJson").notNullable().defaultTo("{}");
+        table.text("result").notNullable();
+        table.text("requestId");
+        table.integer("createdAt").notNullable();
+      },
+    },
     //项目表
     {
       name: "o_project",
@@ -63,6 +94,8 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         table.text("videoRatio");
         table.integer("createTime");
         table.integer("userId");
+        table.integer("ownerUserId");
+        table.integer("groupId");
         table.primary(["id"]);
         table.unique(["id"]);
       },
@@ -342,6 +375,8 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
       builder: (table) => {
         table.integer("id").notNullable();
         table.integer("projectId");
+        table.integer("ownerUserId");
+        table.integer("groupId");
         table.string("taskClass");
         table.string("relatedObjects");
         table.string("model");

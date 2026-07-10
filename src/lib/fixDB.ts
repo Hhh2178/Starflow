@@ -10,6 +10,12 @@ import { hashPassword } from "@/utils/password";
 const vendorData = rawVendorData as Record<string, string>;
 
 export default async (knex: Knex): Promise<void> => {
+  const ensureTable = async (table: string, builder: (table: Knex.CreateTableBuilder) => void) => {
+    if (!(await knex.schema.hasTable(table))) {
+      await knex.schema.createTable(table, builder);
+    }
+  };
+
   const addColumn = async (table: string, column: string, type: string) => {
     if (!(await knex.schema.hasTable(table))) return;
     if (!(await knex.schema.hasColumn(table, column))) {
@@ -59,13 +65,41 @@ export default async (knex: Knex): Promise<void> => {
   });
 
   // 添加新字段
+  await ensureTable("o_group", (table) => {
+    table.increments("id").primary();
+    table.text("name").notNullable();
+    table.integer("adminUserId").unique();
+    table.integer("creatorLimit").notNullable().defaultTo(5);
+    table.text("status").notNullable().defaultTo("enabled");
+    table.integer("createdAt").notNullable();
+    table.integer("updatedAt").notNullable();
+  });
+  await ensureTable("o_auditLog", (table) => {
+    table.increments("id").primary();
+    table.integer("actorUserId").notNullable();
+    table.text("actorRole").notNullable();
+    table.integer("groupId");
+    table.text("action").notNullable();
+    table.text("targetType").notNullable();
+    table.text("targetId");
+    table.text("summaryJson").notNullable().defaultTo("{}");
+    table.text("result").notNullable();
+    table.text("requestId");
+    table.integer("createdAt").notNullable();
+  });
+
   await addColumn("o_user", "passwordHash", "text");
   await addColumn("o_user", "role", "text");
   await addColumn("o_user", "status", "text");
+  await addColumn("o_user", "groupId", "integer");
   await addColumn("o_user", "createdAt", "integer");
   await addColumn("o_user", "updatedAt", "integer");
   await addColumn("o_user", "lastLoginAt", "integer");
   await addColumn("o_user", "mustChangePassword", "boolean");
+  await addColumn("o_project", "ownerUserId", "integer");
+  await addColumn("o_project", "groupId", "integer");
+  await addColumn("o_tasks", "ownerUserId", "integer");
+  await addColumn("o_tasks", "groupId", "integer");
 
   const now = Date.now();
   const users = await knex("o_user").select("*");
@@ -78,6 +112,75 @@ export default async (knex: Knex): Promise<void> => {
     if (user.mustChangePassword === null || user.mustChangePassword === undefined) patch.mustChangePassword = false;
     if (!user.passwordHash && user.password) patch.passwordHash = hashPassword(String(user.password));
     if (Object.keys(patch).length) await knex("o_user").where("id", user.id).update(patch);
+  }
+
+  const pendingName = "待分配";
+  let pendingGroup = await knex("o_group").where({ name: pendingName, adminUserId: null }).first();
+  if (!pendingGroup) {
+    const [id] = await knex("o_group").insert({
+      name: pendingName,
+      adminUserId: null,
+      creatorLimit: 5,
+      status: "enabled",
+      createdAt: now,
+      updatedAt: now,
+    });
+    pendingGroup = { id };
+  }
+  const pendingGroupId = Number(pendingGroup.id);
+
+  const normalizedUsers = await knex("o_user").select("id", "name", "role", "groupId");
+  for (const admin of normalizedUsers.filter((user) => user.role === "admin")) {
+    let group = await knex("o_group").where({ adminUserId: admin.id }).first();
+    if (!group) {
+      const [id] = await knex("o_group").insert({
+        name: `${admin.name}组`,
+        adminUserId: admin.id,
+        creatorLimit: 5,
+        status: "enabled",
+        createdAt: now,
+        updatedAt: now,
+      });
+      group = { id };
+    }
+    await knex("o_user").where({ id: admin.id }).update({ groupId: group.id });
+  }
+
+  await knex("o_user").where({ role: "creator" }).whereNull("groupId").update({ groupId: pendingGroupId });
+
+  await knex("o_project")
+    .whereNull("ownerUserId")
+    .whereNotNull("userId")
+    .update({ ownerUserId: knex.ref("userId") });
+
+  const assignedUsers = await knex("o_user").select("id", "role", "groupId");
+  const usersById = new Map(assignedUsers.map((user) => [Number(user.id), user]));
+  const groupIds = new Set((await knex("o_group").select("id")).map((group) => Number(group.id)));
+  const unassignedProjects = await knex("o_project").whereNull("groupId").select("id", "ownerUserId");
+  for (const project of unassignedProjects) {
+    const owner = project.ownerUserId == null ? undefined : usersById.get(Number(project.ownerUserId));
+    const ownerGroupId = owner?.groupId == null ? null : Number(owner.groupId);
+    const groupId =
+      owner && owner.role !== "super_admin" && ownerGroupId !== null && groupIds.has(ownerGroupId)
+        ? ownerGroupId
+        : pendingGroupId;
+    await knex("o_project").where({ id: project.id }).update({ groupId });
+  }
+
+  const projects = await knex("o_project").select("id", "ownerUserId", "groupId");
+  const projectsById = new Map(projects.map((project) => [Number(project.id), project]));
+  const unassignedTasks = await knex("o_tasks")
+    .whereNull("ownerUserId")
+    .orWhereNull("groupId")
+    .select("id", "projectId", "ownerUserId", "groupId");
+  for (const task of unassignedTasks) {
+    const project = task.projectId == null ? undefined : projectsById.get(Number(task.projectId));
+    if (!project) continue;
+
+    const patch: Record<string, number> = {};
+    if (task.ownerUserId == null && project.ownerUserId != null) patch.ownerUserId = Number(project.ownerUserId);
+    if (task.groupId == null && project.groupId != null) patch.groupId = Number(project.groupId);
+    if (Object.keys(patch).length) await knex("o_tasks").where({ id: task.id }).update(patch);
   }
 
   // 添加新字段

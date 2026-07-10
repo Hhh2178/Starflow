@@ -1,4 +1,4 @@
-// @db-hash 07b9a6531f412999fed73d020c66210f
+// @db-hash 3490f6f9515bf06af28aec36e0f71273
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -67,6 +67,19 @@ export interface o_assetsRole2Audio {
   'assetsAudioId'?: number;
   'assetsRoleId'?: number;
 }
+export interface o_auditLog {
+  'action': string;
+  'actorRole': string;
+  'actorUserId': number;
+  'createdAt': number;
+  'groupId'?: number | null;
+  'id'?: number;
+  'requestId'?: string | null;
+  'result': string;
+  'summaryJson'?: string;
+  'targetId'?: string | null;
+  'targetType': string;
+}
 export interface o_event {
   'createTime'?: number | null;
   'detail'?: string | null;
@@ -77,6 +90,15 @@ export interface o_eventChapter {
   'eventId'?: number | null;
   'id'?: number;
   'novelId'?: number | null;
+}
+export interface o_group {
+  'adminUserId'?: number | null;
+  'createdAt': number;
+  'creatorLimit'?: number;
+  'id'?: number;
+  'name': string;
+  'status'?: string;
+  'updatedAt': number;
 }
 export interface o_image {
   'assetsId'?: number | null;
@@ -115,12 +137,14 @@ export interface o_project {
   'artStyle'?: string | null;
   'createTime'?: number | null;
   'directorManual'?: string | null;
+  'groupId'?: number | null;
   'id'?: number | null;
   'imageModel'?: string | null;
   'imageQuality'?: string | null;
   'intro'?: string | null;
   'mode'?: string | null;
   'name'?: string | null;
+  'ownerUserId'?: number | null;
   'projectType'?: string | null;
   'type'?: string | null;
   'userId'?: number | null;
@@ -186,8 +210,10 @@ export interface o_storyboard {
 }
 export interface o_tasks {
   'describe'?: string | null;
+  'groupId'?: number | null;
   'id'?: number;
   'model'?: string | null;
+  'ownerUserId'?: number | null;
   'projectId'?: number | null;
   'reason'?: string | null;
   'relatedObjects'?: string | null;
@@ -197,14 +223,15 @@ export interface o_tasks {
 }
 export interface o_user {
   'createdAt'?: number | null;
+  'groupId'?: number | null;
   'id'?: number;
   'lastLoginAt'?: number | null;
   'mustChangePassword'?: boolean | null;
   'name'?: string | null;
   'password'?: string | null;
   'passwordHash'?: string | null;
-  'role'?: string | null;
-  'status'?: string | null;
+  'role'?: string;
+  'status'?: string;
   'updatedAt'?: number | null;
 }
 export interface o_vendorConfig {
@@ -243,8 +270,10 @@ export interface DB {
   "o_assets": o_assets;
   "o_assets2Storyboard": o_assets2Storyboard;
   "o_assetsRole2Audio": o_assetsRole2Audio;
+  "o_auditLog": o_auditLog;
   "o_event": o_event;
   "o_eventChapter": o_eventChapter;
+  "o_group": o_group;
   "o_image": o_image;
   "o_imageFlow": o_imageFlow;
   "o_modelPrompt": o_modelPrompt;

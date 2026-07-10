@@ -131,6 +131,27 @@ function assertSafePayload(value: unknown, path: string = "payload"): void {
   }
 }
 
+function stableJsonStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return item;
+    return Object.keys(item)
+      .sort()
+      .reduce<Record<string, unknown>>((ordered, key) => {
+        ordered[key] = item[key];
+        return ordered;
+      }, {});
+  }) ?? "null";
+}
+
+function storedPayloadMatches(storedPayloadJson: unknown, payload: unknown): boolean {
+  if (typeof storedPayloadJson !== "string") return false;
+  try {
+    return stableJsonStringify(JSON.parse(storedPayloadJson)) === stableJsonStringify(payload);
+  } catch {
+    return false;
+  }
+}
+
 function applyJobScope(query: Knex.QueryBuilder, actor: AuthUser): Knex.QueryBuilder {
   if (actor.role === "super_admin") return query;
   if (actor.role === "admin") return query.where("groupId", actor.groupId);
@@ -185,10 +206,16 @@ export async function enqueueGeneration(
     throw new GenerationQueueError(404, "PROJECT_NOT_FOUND", "项目不存在或当前账号无权访问");
   }
   assertSafePayload(input.payload);
+  const payloadJson = stableJsonStringify(input.payload);
 
   const duplicate = await resolvedConnection("o_generationJob").where({ idempotencyKey: input.idempotencyKey }).first();
   if (duplicate) {
-    if (Number(duplicate.projectId) !== input.projectId) {
+    if (
+      Number(duplicate.projectId) !== input.projectId
+      || String(duplicate.handlerKey) !== input.handlerKey
+      || String(duplicate.taskType) !== input.taskType
+      || !storedPayloadMatches(duplicate.payloadJson, input.payload)
+    ) {
       throw new GenerationQueueError(409, "IDEMPOTENCY_KEY_CONFLICT", "幂等键已被其他任务使用");
     }
     return toJobRecord(duplicate);
@@ -204,7 +231,7 @@ export async function enqueueGeneration(
     taskType: input.taskType,
     status: "queued",
     priority: 0,
-    payloadJson: JSON.stringify(input.payload),
+    payloadJson,
     idempotencyKey: input.idempotencyKey,
     queuedAt,
   });

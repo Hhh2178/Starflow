@@ -1,5 +1,6 @@
 import fs from "fs/promises";
 import path from "path";
+import isPathInside from "is-path-inside";
 import type { Knex } from "knex";
 import u from "@/utils";
 import type { GenerationExecutionContext, GenerationExecutionResult } from "@/types/generationQueue";
@@ -146,14 +147,17 @@ async function executeVideoPrompt(
 
     const [vendorId, parsedModelName] = payload.videoModel.split(/:(.+)/);
     const modelName = parsedModelName || payload.videoModel;
-    const promptRoot = getPath(["modelPrompt"]);
+    const promptRoot = path.resolve(getPath(["modelPrompt"]));
     let systemPrompt: string | undefined;
     const modelPrompt = await connection("o_modelPrompt")
       .where({ vendorId, model: modelName })
       .select("path")
       .first();
     if (modelPrompt?.path) {
-      systemPrompt = await tryReadTemplate(readFile, path.join(promptRoot, String(modelPrompt.path)));
+      const boundPromptPath = path.resolve(promptRoot, String(modelPrompt.path));
+      if (isPathInside(boundPromptPath, promptRoot)) {
+        systemPrompt = await tryReadTemplate(readFile, boundPromptPath);
+      }
     }
     if (!systemPrompt) {
       const automaticFile = automaticVideoPromptFile(modelName, payload.mode);
@@ -170,23 +174,27 @@ async function executeVideoPrompt(
     }
 
     const visualManual = getArtPrompt(project.artStyle || "无", "art_skills", "art_storyboard_video");
-    const assetContent = assets
+    const structuredPromptData = {
+      model: modelName,
+      assets: assets
       .filter((asset) => asset.filePath)
-      .map((asset) => `[${asset.id},${asset.type},${asset.name}${audioByRole.get(Number(asset.id)) ? ` audio:${audioByRole.get(Number(asset.id))}` : ""}]`)
-      .join("，");
-    const storyboardContent = storyboards.map((storyboard) => `<storyboardItem
-  videoDesc='${storyboard.videoDesc || ""}'
-  prompt='${storyboard.prompt || ""}'
-  track='${storyboard.track || ""}'
-  duration='${storyboard.duration || ""}'
-  associateAssetsIds='${JSON.stringify(storyboard.associateAssetsIds)}'
-  shouldGenerateImage='${Number(storyboard.shouldGenerateImage) !== 0}'
-></storyboardItem>`).join("\n");
-    const content = `
-**模型名称**：${modelName},
-**资产信息**（角色、场景、道具、音频):${assetContent},
-**分镜信息**：${storyboardContent}
-`;
+        .map((asset) => ({
+          id: Number(asset.id),
+          type: String(asset.type || ""),
+          name: String(asset.name || ""),
+          audioAssetId: audioByRole.get(Number(asset.id)) ?? null,
+        })),
+      storyboards: storyboards.map((storyboard) => ({
+        id: Number(storyboard.id),
+        videoDesc: String(storyboard.videoDesc || ""),
+        prompt: String(storyboard.prompt || ""),
+        track: String(storyboard.track || ""),
+        duration: String(storyboard.duration || ""),
+        associateAssetsIds: storyboard.associateAssetsIds,
+        shouldGenerateImage: Number(storyboard.shouldGenerateImage) !== 0,
+      })),
+    };
+    const content = JSON.stringify(structuredPromptData);
     await context.setProviderRequestId(`video-prompt:${context.jobId}`);
     const { text } = await invokeText("universalAi", {
       system: systemPrompt,

@@ -3,6 +3,7 @@ import { evaluateCapacity } from "@/services/concurrencyPolicy";
 import type { CapacityUsage, ConcurrencyLimit, GenerationTaskType } from "@/types/generationQueue";
 import type { GenerationJobRecord } from "@/services/generationQueue";
 import type { GenerationJobRegistry } from "@/jobs/registry";
+import { completeGenerationUsage } from "@/services/generationUsage";
 
 type SchedulerConnection = Knex | Knex.Transaction;
 
@@ -274,23 +275,17 @@ export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJo
   };
   const intervalMs = options.heartbeatIntervalMs ?? 10_000;
   const timer = intervalMs > 0 ? setInterval(() => void heartbeat().catch(() => undefined), intervalMs) : null;
+  let providerCompleted = false;
 
   try {
     const payload = handler.parsePayload(JSON.parse(String(job.payloadJson)));
     const execution = await handler.execute(context, payload);
-    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: "succeeded",
-      resultJson: JSON.stringify(execution.result),
-      providerRequestId: execution.metering.providerRequestId ?? job.providerRequestId ?? null,
-      finishedAt: now(),
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      heartbeatAt: null,
-    });
+    providerCompleted = true;
+    await completeGenerationUsage(jobId, execution.result, execution.metering, connection, now());
   } catch (error) {
     await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: "failed",
-      errorCode: "HANDLER_EXECUTION_FAILED",
+      status: providerCompleted ? "needs_attention" : "failed",
+      errorCode: providerCompleted ? "ACCOUNTING_FAILED" : "HANDLER_EXECUTION_FAILED",
       errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
       finishedAt: now(),
       leaseOwner: null,

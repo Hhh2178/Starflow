@@ -24,6 +24,7 @@ import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
+import { completeGenerationUsage } from "@/services/generationUsage";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -655,6 +656,50 @@ async function testWorkerLifecycle(db: ReturnType<typeof knex>): Promise<void> {
   assert.equal(completed.providerRequestId, "provider-worker-1");
   assert.deepEqual(JSON.parse(completed.resultJson), { doubled: 8 });
   assert.equal(completed.leaseOwner, null);
+  assert.equal(Number((await db("o_usageLedger").where({ jobId }).count({ count: "id" }).first())?.count), 1);
+}
+
+async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  await db("o_usageLedger").del();
+  await db("o_quotaLedger").del();
+  await db("o_quotaAccount").where({ groupId: 101 }).update({ balance: 100 });
+  const baseJob = {
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    handlerKey: "test.usage",
+    taskType: "image",
+    status: "running",
+    priority: 0,
+    payloadJson: "{}",
+    queuedAt: 1,
+    attemptCount: 1,
+  };
+  const [knownJobId] = await db("o_generationJob").insert({ ...baseJob, idempotencyKey: "usage-known" });
+  const [unknownJobId] = await db("o_generationJob").insert({ ...baseJob, idempotencyKey: "usage-unknown" });
+  const knownMetering = {
+    providerId: "vendor-1",
+    modelId: "image-1",
+    units: { images: 1 },
+    estimatedCost: 12.5,
+    currency: "CNY",
+    pricingSnapshot: { image: 12.5 },
+    providerRequestId: "provider-known",
+  };
+  const knownUsage = await completeGenerationUsage(Number(knownJobId), { ok: true }, knownMetering, db, 500);
+  await completeGenerationUsage(Number(knownJobId), { ok: true }, knownMetering, db, 501);
+  const unknownUsage = await completeGenerationUsage(Number(unknownJobId), { ok: true }, {
+    ...knownMetering,
+    estimatedCost: null,
+    currency: null,
+    providerRequestId: null,
+  }, db, 502);
+  assert.equal(Number((await db("o_usageLedger").where({ jobId: knownJobId }).count({ count: "id" }).first())?.count), 1);
+  assert.equal(Number((await db("o_quotaLedger").where({ usageLedgerId: knownUsage.id }).count({ count: "id" }).first())?.count), 1);
+  assert.equal(Number((await db("o_quotaAccount").where({ groupId: 101 }).first()).balance), 87.5);
+  assert.equal(unknownUsage.estimatedCost, null);
+  assert.equal(Number((await db("o_quotaLedger").where({ usageLedgerId: unknownUsage.id }).count({ count: "id" }).first())?.count), 0);
 }
 
 async function main(): Promise<void> {
@@ -712,6 +757,7 @@ async function main(): Promise<void> {
     await testQueueAndAtomicClaim(db);
     await testExpiredLeaseRecovery(db);
     await testWorkerLifecycle(db);
+    await testUsageAndQuotaLedger(db);
     await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).update({ totalLimit: 7 });
     await migrateGenerationQueue(db);
     assert.equal((await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).first()).totalLimit, 7);

@@ -43,6 +43,25 @@ export interface GenerationJobListItem {
   errorMessage: string | null;
 }
 
+export interface GenerationJobDetail {
+  id: number;
+  groupId: number;
+  ownerUserId: number;
+  projectId: number | null;
+  sourceTaskId: number | null;
+  handlerKey: string;
+  taskType: GenerationTaskType;
+  status: GenerationJobStatus;
+  priority: number;
+  queuePosition: number | null;
+  queuedAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  result: unknown;
+}
+
 export interface GenerationJobListFilters {
   status?: GenerationJobStatus;
   taskType?: GenerationTaskType;
@@ -115,6 +134,35 @@ function applyJobScope(query: Knex.QueryBuilder, actor: AuthUser): Knex.QueryBui
   if (actor.role === "super_admin") return query;
   if (actor.role === "admin") return query.where("groupId", actor.groupId);
   return query.where("ownerUserId", actor.id);
+}
+
+function parseResultJson(value: unknown): unknown {
+  if (typeof value !== "string") return null;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+async function getQueuePosition(connection: QueueConnection, job: any): Promise<number | null> {
+  if (job.status !== "queued") return null;
+  const row = await connection("o_generationJob")
+    .where({ groupId: job.groupId, status: "queued" })
+    .andWhere(function () {
+      this.where("priority", ">", job.priority)
+        .orWhere(function () {
+          this.where("priority", job.priority).andWhere("queuedAt", "<", job.queuedAt);
+        })
+        .orWhere(function () {
+          this.where("priority", job.priority)
+            .andWhere("queuedAt", job.queuedAt)
+            .andWhere("id", "<", job.id);
+        });
+    })
+    .count({ count: "id" })
+    .first();
+  return Number(row?.count ?? 0) + 1;
 }
 
 async function inTransaction<T>(
@@ -224,6 +272,53 @@ export async function reprioritizeGenerationJob(
     });
     return toJobRecord(await trx("o_generationJob").where({ id: jobId }).first());
   });
+}
+
+export async function getGenerationJob(
+  actor: AuthUser,
+  jobId: number,
+  connection?: QueueConnection,
+): Promise<GenerationJobDetail> {
+  const resolvedConnection = await resolveConnection(connection);
+  const job = await applyJobScope(resolvedConnection("o_generationJob").where({ id: jobId }), actor)
+    .select(
+      "id",
+      "groupId",
+      "ownerUserId",
+      "projectId",
+      "sourceTaskId",
+      "handlerKey",
+      "taskType",
+      "status",
+      "priority",
+      "queuedAt",
+      "startedAt",
+      "finishedAt",
+      "errorCode",
+      "errorMessage",
+      "resultJson",
+    )
+    .first();
+  if (!job) throw new GenerationQueueError(404, "JOB_NOT_FOUND", "任务不存在");
+
+  return {
+    id: Number(job.id),
+    groupId: Number(job.groupId),
+    ownerUserId: Number(job.ownerUserId),
+    projectId: job.projectId == null ? null : Number(job.projectId),
+    sourceTaskId: job.sourceTaskId == null ? null : Number(job.sourceTaskId),
+    handlerKey: String(job.handlerKey),
+    taskType: job.taskType as GenerationTaskType,
+    status: job.status as GenerationJobStatus,
+    priority: Number(job.priority),
+    queuePosition: await getQueuePosition(resolvedConnection, job),
+    queuedAt: Number(job.queuedAt),
+    startedAt: job.startedAt == null ? null : Number(job.startedAt),
+    finishedAt: job.finishedAt == null ? null : Number(job.finishedAt),
+    errorCode: job.errorCode == null ? null : String(job.errorCode),
+    errorMessage: job.errorMessage == null ? null : String(job.errorMessage),
+    result: parseResultJson(job.resultJson),
+  };
 }
 
 export async function listGenerationJobs(

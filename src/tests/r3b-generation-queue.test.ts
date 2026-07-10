@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import type { AddressInfo } from "node:net";
+import express from "express";
 import knex from "knex";
 import initDB from "@/lib/initDB";
 import { migrateGenerationQueue } from "@/lib/fixDB";
@@ -14,6 +16,7 @@ import type { AuthUser } from "@/types/auth";
 import {
   cancelGenerationJob,
   enqueueGeneration,
+  getGenerationJob,
   GenerationQueueError,
   listGenerationJobs,
   reprioritizeGenerationJob,
@@ -28,6 +31,7 @@ import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
 import { getQuotaOverview, QuotaManagementError } from "@/services/quotaManagement";
+import getJobRouter from "@/routes/generation/getJob";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -541,6 +545,129 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(await claimNextJob(101, { connection: db, leaseOwner: "fifo", now: 30_001 }), null);
 }
 
+async function testGenerationJobSafetyContract(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  const creatorA: AuthUser = { id: 3, name: "creator-a", role: "creator", groupId: 101 };
+  const adminA: AuthUser = { id: 2, name: "admin-a", role: "admin", groupId: 101 };
+  const superAdmin: AuthUser = { id: 1, name: "root", role: "super_admin", groupId: null };
+  const baseJob = {
+    projectId: 1001,
+    sourceTaskId: 501,
+    handlerKey: "test.text",
+    taskType: "text",
+    status: "queued",
+    priority: 10,
+    payloadJson: JSON.stringify({ prompt: "must-not-leak" }),
+    resultJson: JSON.stringify({ text: "safe result" }),
+    errorCode: "PROVIDER_TIMEOUT",
+    errorMessage: "timed out",
+    leaseOwner: "worker-secret",
+    providerRequestId: "provider-secret",
+    queuedAt: 200,
+    startedAt: null,
+    finishedAt: null,
+  };
+  const [adminVisibleId] = await db("o_generationJob").insert({
+    ...baseJob,
+    groupId: 101,
+    ownerUserId: 5,
+    priority: 20,
+    queuedAt: 300,
+    idempotencyKey: "get-job-admin-visible",
+  });
+  const [creatorVisibleId] = await db("o_generationJob").insert({
+    ...baseJob,
+    groupId: 101,
+    ownerUserId: 3,
+    idempotencyKey: "get-job-creator-visible",
+  });
+  await db("o_generationJob").insert({
+    ...baseJob,
+    groupId: 101,
+    ownerUserId: 3,
+    resultJson: "{broken-json",
+    idempotencyKey: "get-job-id-tiebreaker",
+  });
+  const [groupBJobId] = await db("o_generationJob").insert({
+    ...baseJob,
+    groupId: 102,
+    ownerUserId: 4,
+    projectId: 1002,
+    priority: 100,
+    queuedAt: 1,
+    idempotencyKey: "get-job-other-group",
+  });
+
+  const creatorJob = await getGenerationJob(creatorA, Number(creatorVisibleId), db);
+  assert.deepEqual(Object.keys(creatorJob).sort(), [
+    "errorCode",
+    "errorMessage",
+    "finishedAt",
+    "groupId",
+    "handlerKey",
+    "id",
+    "ownerUserId",
+    "priority",
+    "projectId",
+    "queuePosition",
+    "queuedAt",
+    "result",
+    "sourceTaskId",
+    "startedAt",
+    "status",
+    "taskType",
+  ].sort());
+  assert.deepEqual(creatorJob.result, { text: "safe result" });
+  assert.equal(creatorJob.queuePosition, 2);
+  assert.equal("payloadJson" in creatorJob, false);
+  assert.equal("leaseOwner" in creatorJob, false);
+  assert.equal("providerRequestId" in creatorJob, false);
+
+  assert.equal((await getGenerationJob(adminA, Number(adminVisibleId), db)).ownerUserId, 5);
+  assert.equal((await getGenerationJob(superAdmin, Number(groupBJobId), db)).groupId, 102);
+  for (const [actor, jobId] of [
+    [creatorA, adminVisibleId],
+    [creatorA, groupBJobId],
+    [adminA, groupBJobId],
+  ] as const) {
+    await assert.rejects(
+      getGenerationJob(actor, Number(jobId), db),
+      (error: unknown) => error instanceof GenerationQueueError && error.status === 404 && error.code === "JOB_NOT_FOUND",
+    );
+  }
+
+  const malformedResultJob = await db("o_generationJob")
+    .where({ idempotencyKey: "get-job-id-tiebreaker" })
+    .first();
+  await db("o_generationJob")
+    .where({ id: malformedResultJob.id })
+    .update({ status: "succeeded", finishedAt: 400 });
+  const completedJob = await getGenerationJob(creatorA, Number(malformedResultJob.id), db);
+  assert.equal(completedJob.result, null);
+  assert.equal(completedJob.queuePosition, null);
+}
+
+async function testGetGenerationJobRouteValidation(): Promise<void> {
+  const app = express();
+  app.use((req, _res, next) => {
+    (req as any).user = { id: 3, name: "creator-a", role: "creator", groupId: 101 } satisfies AuthUser;
+    next();
+  });
+  app.use("/api/generation/getJob", getJobRouter);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    for (const query of ["", "?id=0", "?id=-1", "?id=1.5", "?id=not-a-number"]) {
+      const response = await fetch(`http://127.0.0.1:${port}/api/generation/getJob${query}`);
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).code, 400);
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+}
+
 async function testExpiredLeaseRecovery(db: ReturnType<typeof knex>): Promise<void> {
   await db("o_generationJob").del();
   const handler = (key: string, canRetryAfterProviderSubmission: boolean): GenerationJobHandler => ({
@@ -784,6 +911,8 @@ async function main(): Promise<void> {
     );
     await testPolicyAuthorization(db);
     await testQueueAndAtomicClaim(db);
+    await testGenerationJobSafetyContract(db);
+    await testGetGenerationJobRouteValidation();
     await testExpiredLeaseRecovery(db);
     await testWorkerLifecycle(db);
     await testUsageAndQuotaLedger(db);

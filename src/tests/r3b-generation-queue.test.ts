@@ -20,6 +20,9 @@ import { chooseFairCandidate, claimNextJob } from "@/services/generationSchedule
 import { executeClaimedJob, recoverExpiredJobs } from "@/services/generationScheduler";
 import { createGenerationJobRegistry } from "@/jobs/registry";
 import type { GenerationJobHandler } from "@/types/generationQueue";
+import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
+import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
+import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -76,6 +79,74 @@ function testCapacityEvaluation(): void {
     }),
     { allowed: true },
   );
+}
+
+async function testTrustedHandlerContracts(): Promise<void> {
+  const calls: string[] = [];
+  const metering = {
+    providerId: "fake",
+    modelId: "fake-model",
+    units: { requests: 1 },
+    estimatedCost: null,
+    currency: null,
+    pricingSnapshot: {},
+    providerRequestId: null,
+  };
+  const context = {
+    jobId: 1,
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    signal: new AbortController().signal,
+    heartbeat: async () => undefined,
+    setProviderRequestId: async () => undefined,
+  };
+  const handlers = [
+    createTextGenerationHandler(async (payload) => {
+      calls.push(payload.operation);
+      return { result: { text: "ok" }, metering };
+    }),
+    createImageGenerationHandler(async (payload) => {
+      calls.push(payload.operation);
+      return { result: { path: "/image.jpg" }, metering };
+    }),
+    createVideoGenerationHandler(async (payload) => {
+      calls.push(payload.operation);
+      return { result: { path: "/video.mp4" }, metering };
+    }),
+  ];
+  const payloads = [
+    { operation: "novel_events", projectId: 1001, targetId: 11, model: "1:text", prompt: "text" },
+    {
+      operation: "asset",
+      projectId: 1001,
+      targetId: 12,
+      model: "1:image",
+      prompt: "image",
+      referenceResourceIds: [],
+      size: "1K",
+      aspectRatio: "16:9",
+    },
+    {
+      operation: "track",
+      projectId: 1001,
+      targetId: 13,
+      model: "1:video",
+      prompt: "video",
+      referenceResourceIds: [],
+      duration: 5,
+      resolution: "1080p",
+      aspectRatio: "16:9",
+      audio: false,
+    },
+  ];
+  for (const [index, handler] of handlers.entries()) {
+    const parsed = handler.parsePayload(payloads[index]);
+    await handler.execute(context, parsed as never);
+    assert.throws(() => handler.parsePayload({ ...payloads[index], providerKey: "secret" }));
+    assert.throws(() => handler.parsePayload({ ...payloads[index], base64: "data:image/png;base64,AAAA" }));
+  }
+  assert.deepEqual(calls, ["novel_events", "asset", "track"]);
 }
 
 async function expectPolicyError(
@@ -490,6 +561,7 @@ async function testWorkerLifecycle(db: ReturnType<typeof knex>): Promise<void> {
 async function main(): Promise<void> {
   testCapacityEvaluation();
   testFairSelection();
+  await testTrustedHandlerContracts();
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
     await initDB(db, false, false);

@@ -7,7 +7,7 @@ import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import { executeCoreVideoGeneration } from "@/jobs/handlers/coreVideoExecutor";
 
 export const coreGenerationRegistry = createGenerationJobRegistry([
-  createTextGenerationHandler(executeCoreTextGeneration),
+  createTextGenerationHandler((payload) => executeCoreTextGeneration(payload)),
   createImageGenerationHandler(executeCoreImageGeneration),
   createVideoGenerationHandler(executeCoreVideoGeneration),
 ]);

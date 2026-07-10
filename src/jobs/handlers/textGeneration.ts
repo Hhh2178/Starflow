@@ -5,13 +5,48 @@ import type {
   GenerationJobHandler,
 } from "@/types/generationQueue";
 
-export const textGenerationPayloadSchema = z.object({
-  operation: z.enum(["novel_events", "video_prompt", "script_agent", "production_agent"]),
+const commonTextPayloadShape = {
   projectId: z.number().int().positive(),
   targetId: z.number().int().positive(),
   model: z.string().min(1),
   prompt: z.string(),
+};
+
+const novelEventsPayloadSchema = z.object({
+  operation: z.literal("novel_events"),
+  ...commonTextPayloadShape,
 }).strict();
+
+const videoPromptPayloadSchema = z.object({
+  operation: z.literal("video_prompt"),
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  prompt: z.literal(""),
+  videoModel: z.string().min(1),
+  mode: z.string().min(1),
+  references: z.array(z.object({
+    kind: z.enum(["asset", "storyboard"]),
+    id: z.number().int().positive(),
+  }).strict()),
+}).strict();
+
+const scriptAgentPayloadSchema = z.object({
+  operation: z.literal("script_agent"),
+  ...commonTextPayloadShape,
+}).strict();
+
+const productionAgentPayloadSchema = z.object({
+  operation: z.literal("production_agent"),
+  ...commonTextPayloadShape,
+}).strict();
+
+export const textGenerationPayloadSchema = z.discriminatedUnion("operation", [
+  novelEventsPayloadSchema,
+  videoPromptPayloadSchema,
+  scriptAgentPayloadSchema,
+  productionAgentPayloadSchema,
+]);
 
 export type TextGenerationPayload = z.infer<typeof textGenerationPayloadSchema>;
 

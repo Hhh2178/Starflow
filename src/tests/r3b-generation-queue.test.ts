@@ -25,13 +25,22 @@ import { chooseFairCandidate, claimNextJob } from "@/services/generationSchedule
 import { executeClaimedJob, recoverExpiredJobs } from "@/services/generationScheduler";
 import { createGenerationJobRegistry } from "@/jobs/registry";
 import type { GenerationJobHandler } from "@/types/generationQueue";
-import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
+import { createTextGenerationHandler, textGenerationPayloadSchema } from "@/jobs/handlers/textGeneration";
+import { executeCoreTextGeneration } from "@/jobs/handlers/coreTextExecutor";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
-import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
+import {
+  enqueueAssetImageJob,
+  enqueueNovelEventJobs,
+  enqueueStoryboardImageJobs,
+  enqueueVideoJobs,
+  enqueueVideoPromptJobs,
+} from "@/services/generationWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
 import { getQuotaOverview, QuotaManagementError } from "@/services/quotaManagement";
 import { createGetJobRouter } from "@/routes/generation/getJob";
+import { createGenerateVideoPromptHandler } from "@/routes/production/workbench/generateVideoPrompt";
+import { createBatchGeneratePromptHandler } from "@/routes/production/workbench/batchGeneratePrompt";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -148,6 +157,58 @@ function testCapacityEvaluation(): void {
     }),
     { allowed: true },
   );
+}
+
+function testTextGenerationPayloadContract(): void {
+  assert.deepEqual(
+    textGenerationPayloadSchema.parse({
+      operation: "novel_events",
+      projectId: 1001,
+      targetId: 501,
+      model: "universalAi",
+      prompt: "",
+    }),
+    {
+      operation: "novel_events",
+      projectId: 1001,
+      targetId: 501,
+      model: "universalAi",
+      prompt: "",
+    },
+  );
+  const videoPromptPayload = {
+    operation: "video_prompt" as const,
+    projectId: 1001,
+    targetId: 901,
+    model: "universalAi" as const,
+    prompt: "" as const,
+    videoModel: "vendor:seedance-2.0",
+    mode: "multi-reference",
+    references: [
+      { kind: "asset" as const, id: 601 },
+      { kind: "storyboard" as const, id: 701 },
+    ],
+  };
+  assert.deepEqual(textGenerationPayloadSchema.parse(videoPromptPayload), videoPromptPayload);
+
+  for (const payload of [
+    { ...videoPromptPayload, model: "vendor:text-model" },
+    { ...videoPromptPayload, prompt: "client supplied prompt" },
+    { ...videoPromptPayload, references: [{ kind: "image", id: 601 }] },
+    { ...videoPromptPayload, concurrentCount: 99 },
+  ]) {
+    assert.throws(() => textGenerationPayloadSchema.parse(payload));
+  }
+
+  for (const operation of ["script_agent", "production_agent"] as const) {
+    assert.equal(textGenerationPayloadSchema.parse({
+      operation,
+      projectId: 1001,
+      targetId: 1,
+      model: "universalAi",
+      prompt: "",
+    }).operation, operation);
+  }
 }
 
 async function testTrustedHandlerContracts(): Promise<void> {
@@ -400,6 +461,95 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   );
   await db("o_generationJob").where({ id: videoJobs[0].jobId }).del();
 
+  await db("o_project").insert({
+    id: 1103,
+    name: "same-group-other-project",
+    ownerUserId: 3,
+    groupId: 101,
+    createTime: Date.now(),
+  });
+  await db("o_assets").insert({ id: 602, projectId: 1103, type: "role", name: "other hero" });
+  await db("o_storyboard").insert({ id: 702, projectId: 1002, scriptId: 802, videoDesc: "other group shot" });
+  await db("o_videoTrack").insert([
+    { id: 902, projectId: 1001, scriptId: 801, state: "未生成" },
+    { id: 903, projectId: 1103, scriptId: 803, state: "未生成" },
+    { id: 904, projectId: 1001, scriptId: 801, state: "未生成", reason: "old error" },
+  ]);
+  const promptInput = {
+    projectId: 1001,
+    videoModel: "vendor:seedance-2.0",
+    mode: "multi-reference",
+    tracks: [
+      { trackId: 901, references: [{ kind: "asset" as const, id: 601 }] },
+      { trackId: 902, references: [{ kind: "storyboard" as const, id: 701 }] },
+    ],
+  };
+  const promptJobs = await enqueueVideoPromptJobs(creatorA, promptInput, "request-prompt-1", db);
+  const duplicatePromptJobs = await enqueueVideoPromptJobs(creatorA, promptInput, "request-prompt-1", db);
+  assert.deepEqual(promptJobs.map(({ targetId, status }) => ({ targetId, status })), [
+    { targetId: 901, status: "queued" },
+    { targetId: 902, status: "queued" },
+  ]);
+  assert.deepEqual(duplicatePromptJobs.map((item) => item.jobId), promptJobs.map((item) => item.jobId));
+  const promptJobRows = await db("o_generationJob")
+    .whereIn("id", promptJobs.map((item) => item.jobId))
+    .orderBy("id")
+    .select("idempotencyKey", "handlerKey", "taskType", "payloadJson");
+  assert.deepEqual(promptJobRows.map((row) => row.idempotencyKey), [
+    "video-prompt:request-prompt-1:901",
+    "video-prompt:request-prompt-1:902",
+  ]);
+  assert.equal(promptJobRows.every((row) => row.handlerKey === "core.text" && row.taskType === "text"), true);
+  const promptPayloads = promptJobRows.map((row) => textGenerationPayloadSchema.parse(JSON.parse(row.payloadJson)));
+  assert.deepEqual(promptPayloads, [
+    {
+      operation: "video_prompt",
+      projectId: 1001,
+      targetId: 901,
+      model: "universalAi",
+      prompt: "",
+      videoModel: "vendor:seedance-2.0",
+      mode: "multi-reference",
+      references: [{ kind: "asset", id: 601 }],
+    },
+    {
+      operation: "video_prompt",
+      projectId: 1001,
+      targetId: 902,
+      model: "universalAi",
+      prompt: "",
+      videoModel: "vendor:seedance-2.0",
+      mode: "multi-reference",
+      references: [{ kind: "storyboard", id: 701 }],
+    },
+  ]);
+  assert.deepEqual(
+    await db("o_videoTrack").whereIn("id", [901, 902]).orderBy("id").select("id", "state", "reason"),
+    [
+      { id: 901, state: "生成中", reason: null },
+      { id: 902, state: "生成中", reason: null },
+    ],
+  );
+  await db("o_generationJob").whereIn("id", promptJobs.map((item) => item.jobId)).del();
+
+  for (const [trackId, references] of [
+    [904, [{ kind: "asset", id: 602 }]],
+    [904, [{ kind: "storyboard", id: 702 }]],
+    [903, []],
+  ] as const) {
+    await assert.rejects(
+      enqueueVideoPromptJobs(creatorA, {
+        projectId: 1001,
+        videoModel: "vendor:seedance-2.0",
+        mode: "multi-reference",
+        tracks: [{ trackId, references: references.map((reference) => ({ ...reference })) }],
+      }, `invalid-prompt-${trackId}-${references.length}`, db),
+      (error: unknown) => error instanceof GenerationQueueError && error.status === 404,
+    );
+  }
+  assert.equal((await db("o_videoTrack").where({ id: 904 }).first()).state, "未生成");
+  assert.equal(Number((await db("o_generationJob").count({ count: "id" }).first())?.count), 0);
+
   for (const payload of [
     { providerKey: "secret" },
     { imageBase64: "AAAA" },
@@ -603,6 +753,240 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
   await db("o_generationJob").where({ id: blockedHead.id }).update({ queuedAt: 1 });
   await db("o_generationJob").where({ id: laterImage.id }).update({ queuedAt: 2 });
   assert.equal(await claimNextJob(101, { connection: db, leaseOwner: "fifo", now: 30_001 }), null);
+}
+
+async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_project").where({ id: 1001 }).update({ artStyle: "cinematic" });
+  await db("o_image").insert({ id: 960, assetsId: 961, filePath: "/project/hero.png", state: "已完成" });
+  await db("o_assets").insert({
+    id: 961,
+    projectId: 1001,
+    imageId: 960,
+    type: "role",
+    name: "Hero",
+  });
+  await db("o_storyboard").insert({
+    id: 962,
+    projectId: 1001,
+    scriptId: 801,
+    prompt: "storyboard image prompt",
+    videoDesc: "Hero crosses the rain-soaked street",
+    track: "main",
+    duration: "4",
+    shouldGenerateImage: 1,
+  });
+  await db("o_assets2Storyboard").insert({ storyboardId: 962, assetId: 961 });
+  await db("o_videoTrack").insert([
+    { id: 963, projectId: 1001, scriptId: 801, state: "生成中" },
+    { id: 964, projectId: 1001, scriptId: 801, state: "生成中" },
+  ]);
+  await db("o_modelPrompt").insert({
+    id: 990,
+    vendorId: "vendor",
+    model: "seedance-2.0",
+    path: "video/custom-seedance.md",
+  });
+
+  const readPaths: string[] = [];
+  const aiCalls: Array<{ model: string; input: any }> = [];
+  const result = await executeCoreTextGeneration({
+    operation: "video_prompt",
+    projectId: 1001,
+    targetId: 963,
+    model: "universalAi",
+    prompt: "",
+    videoModel: "vendor:seedance-2.0",
+    mode: "multi-reference",
+    references: [
+      { kind: "asset", id: 961 },
+      { kind: "storyboard", id: 962 },
+    ],
+  }, {
+    connection: db,
+    getPath: () => "C:\\prompt-root",
+    readFile: async (filePath) => {
+      readPaths.push(filePath);
+      return "bound video prompt template";
+    },
+    getArtPrompt: (styleName, source, fileName) => {
+      assert.deepEqual([styleName, source, fileName], ["cinematic", "art_skills", "art_storyboard_video"]);
+      return "cinematic visual manual";
+    },
+    invokeText: async (model, input) => {
+      aiCalls.push({ model, input });
+      return { text: "generated video prompt" };
+    },
+  });
+  assert.equal(readPaths.length, 1);
+  assert.equal(readPaths[0].endsWith("custom-seedance.md"), true);
+  assert.equal(aiCalls[0].model, "universalAi");
+  assert.equal(aiCalls[0].input.system, "bound video prompt template");
+  assert.equal(aiCalls[0].input.messages[0].content, "cinematic visual manual");
+  assert.equal(aiCalls[0].input.messages[1].content.includes("Hero"), true);
+  assert.equal(aiCalls[0].input.messages[1].content.includes("Hero crosses the rain-soaked street"), true);
+  assert.deepEqual(result, {
+    result: { trackId: 963, prompt: "generated video prompt" },
+    metering: {
+      providerId: null,
+      modelId: "universalAi",
+      units: {},
+      estimatedCost: null,
+      currency: null,
+      pricingSnapshot: {},
+      providerRequestId: null,
+    },
+  });
+  assert.deepEqual(
+    await db("o_videoTrack").where({ id: 963 }).select("state", "prompt", "reason").first(),
+    { state: "已完成", prompt: "generated video prompt", reason: null },
+  );
+
+  const automaticTemplatePaths: string[] = [];
+  await assert.rejects(
+    executeCoreTextGeneration({
+      operation: "video_prompt",
+      projectId: 1001,
+      targetId: 964,
+      model: "universalAi",
+      prompt: "",
+      videoModel: "vendor:wan-2.6",
+      mode: "startFrameOptional",
+      references: [],
+    }, {
+      connection: db,
+      getPath: () => "C:\\prompt-root",
+      readFile: async (filePath) => {
+        automaticTemplatePaths.push(filePath);
+        return "automatic wan template";
+      },
+      getArtPrompt: () => "cinematic visual manual",
+      invokeText: async () => {
+        throw new Error("provider unavailable");
+      },
+    }),
+    /provider unavailable/,
+  );
+  assert.equal(automaticTemplatePaths.some((filePath) => filePath.endsWith("wan2.6Single-imageFirstFrameMode.md")), true);
+  assert.deepEqual(
+    await db("o_videoTrack").where({ id: 964 }).select("state", "reason").first(),
+    { state: "生成失败", reason: "provider unavailable" },
+  );
+}
+
+async function testVideoPromptRouteHandlers(): Promise<void> {
+  const actor: AuthUser = { id: 3, name: "creator-a", role: "creator", groupId: 101 };
+  const calls: Array<{ actor: AuthUser; input: any; requestId: string }> = [];
+  const enqueue = async (requestActor: AuthUser, input: any, requestId: string) => {
+    calls.push({ actor: requestActor, input, requestId });
+    return input.tracks.map((track: any, index: number) => ({
+      jobId: 2000 + index,
+      targetId: track.trackId,
+      status: "queued" as const,
+    }));
+  };
+  const createResponse = () => {
+    const response: any = {
+      statusCode: 200,
+      body: undefined,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      send(body: unknown) {
+        this.body = body;
+        return this;
+      },
+    };
+    return response;
+  };
+
+  const singleResponse = createResponse();
+  await createGenerateVideoPromptHandler(enqueue as any)({
+    user: actor,
+    headers: { "x-request-id": "route-single-request" },
+    body: {
+      projectId: 1001,
+      trackId: 901,
+      model: "vendor:seedance-2.0",
+      mode: "multi-reference",
+      concurrentCount: 99,
+      info: [
+        { id: 601, sources: "assets" },
+        { id: 701, sources: "storyboard" },
+      ],
+    },
+  } as any, singleResponse, (() => undefined) as any);
+  assert.equal(singleResponse.statusCode, 200);
+  assert.deepEqual(singleResponse.body, {
+    code: 200,
+    data: {
+      jobId: 2000,
+      targetId: 901,
+      status: "queued",
+      message: "已加入视频提示词生成队列",
+    },
+    message: "成功",
+  });
+  assert.deepEqual(calls[0], {
+    actor,
+    requestId: "route-single-request",
+    input: {
+      projectId: 1001,
+      videoModel: "vendor:seedance-2.0",
+      mode: "multi-reference",
+      tracks: [{
+        trackId: 901,
+        references: [
+          { kind: "asset", id: 601 },
+          { kind: "storyboard", id: 701 },
+        ],
+      }],
+    },
+  });
+  assert.equal("concurrentCount" in calls[0].input, false);
+
+  const batchResponse = createResponse();
+  await createBatchGeneratePromptHandler(enqueue as any)({
+    user: actor,
+    headers: { "x-request-id": "route-batch-request" },
+    body: {
+      projectId: 1001,
+      model: "vendor:wan-2.6",
+      mode: "startFrameOptional",
+      concurrentCount: 42,
+      trackData: [
+        { trackId: 901, info: [{ id: 601, sources: "assets" }] },
+        { trackId: 902, info: [{ id: 701, sources: "storyboard" }] },
+      ],
+    },
+  } as any, batchResponse, (() => undefined) as any);
+  assert.equal(batchResponse.statusCode, 200);
+  assert.deepEqual(batchResponse.body, {
+    code: 200,
+    data: {
+      items: [
+        { jobId: 2000, targetId: 901, status: "queued" },
+        { jobId: 2001, targetId: 902, status: "queued" },
+      ],
+      total: 2,
+      message: "已加入视频提示词生成队列",
+    },
+    message: "成功",
+  });
+  assert.deepEqual(calls[1], {
+    actor,
+    requestId: "route-batch-request",
+    input: {
+      projectId: 1001,
+      videoModel: "vendor:wan-2.6",
+      mode: "startFrameOptional",
+      tracks: [
+        { trackId: 901, references: [{ kind: "asset", id: 601 }] },
+        { trackId: 902, references: [{ kind: "storyboard", id: 701 }] },
+      ],
+    },
+  });
+  assert.equal("concurrentCount" in calls[1].input, false);
 }
 
 async function testGenerationJobSafetyContract(db: ReturnType<typeof knex>): Promise<void> {
@@ -952,7 +1336,9 @@ async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<voi
 async function main(): Promise<void> {
   testCapacityEvaluation();
   testFairSelection();
+  testTextGenerationPayloadContract();
   await testTrustedHandlerContracts();
+  await testVideoPromptRouteHandlers();
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
     await initDB(db, false, false);
@@ -1005,6 +1391,7 @@ async function main(): Promise<void> {
     );
     await testPolicyAuthorization(db);
     await testQueueAndAtomicClaim(db);
+    await testCoreVideoPromptExecutor(db);
     await testGenerationJobSafetyContract(db);
     await testGetGenerationJobRouteHandler(db);
     await testExpiredLeaseRecovery(db);

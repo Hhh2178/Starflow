@@ -50,6 +50,16 @@ export interface EnqueueVideosInput {
   }>;
 }
 
+export interface EnqueueVideoPromptsInput {
+  projectId: number;
+  videoModel: string;
+  mode: string;
+  tracks: Array<{
+    trackId: number;
+    references: VideoResourceReference[];
+  }>;
+}
+
 export interface QueuedVideoItem extends QueuedWorkflowItem {
   videoId: number;
 }
@@ -311,6 +321,79 @@ export async function enqueueVideoJobs(
         idempotencyKey: `video:${requestId}:${track.trackId}`,
       }, trx);
       items.push({ jobId: job.id, targetId: track.trackId, videoId: Number(videoId), status: "queued" });
+    }
+    return items;
+  });
+}
+
+export async function enqueueVideoPromptJobs(
+  actor: AuthUser,
+  input: EnqueueVideoPromptsInput,
+  requestId: string,
+  connection?: WorkflowConnection,
+): Promise<QueuedWorkflowItem[]> {
+  const resolvedConnection = await resolveConnection(connection);
+  return inTransaction(resolvedConnection, async (trx) => {
+    const tracks = [...new Map(input.tracks.map((track) => [track.trackId, track])).values()];
+    if (tracks.length === 0) {
+      throw new GenerationQueueError(422, "VIDEO_PROMPT_TRACK_REQUIRED", "至少需要一个视频轨道");
+    }
+
+    const trackIds = tracks.map((track) => track.trackId);
+    const [project, trackRows] = await Promise.all([
+      trx("o_project").where({ id: input.projectId }).select("id").first(),
+      trx("o_videoTrack").where({ projectId: input.projectId }).whereIn("id", trackIds).select("id"),
+    ]);
+    if (!project || trackRows.length !== trackIds.length) {
+      throw new GenerationQueueError(404, "VIDEO_PROMPT_TRACK_NOT_FOUND", "部分视频轨道不存在或不属于当前项目");
+    }
+
+    const assetIds = [...new Set(tracks.flatMap((track) =>
+      track.references.filter((reference) => reference.kind === "asset").map((reference) => reference.id),
+    ))];
+    const storyboardIds = [...new Set(tracks.flatMap((track) =>
+      track.references.filter((reference) => reference.kind === "storyboard").map((reference) => reference.id),
+    ))];
+    const [assets, storyboards] = await Promise.all([
+      assetIds.length === 0
+        ? Promise.resolve([])
+        : trx("o_assets").where({ projectId: input.projectId }).whereIn("id", assetIds).select("id"),
+      storyboardIds.length === 0
+        ? Promise.resolve([])
+        : trx("o_storyboard").where({ projectId: input.projectId }).whereIn("id", storyboardIds).select("id"),
+    ]);
+    if (assets.length !== assetIds.length || storyboards.length !== storyboardIds.length) {
+      throw new GenerationQueueError(404, "VIDEO_PROMPT_REFERENCE_NOT_FOUND", "部分提示词参考资源不存在或不属于当前项目");
+    }
+
+    const items: QueuedWorkflowItem[] = [];
+    for (const track of tracks) {
+      const references = [...new Map(track.references.map((reference) => [
+        `${reference.kind}:${reference.id}`,
+        reference,
+      ])).values()];
+      await trx("o_videoTrack").where({ id: track.trackId, projectId: input.projectId }).update({
+        state: "生成中",
+        reason: null,
+      });
+      const job = await enqueueGeneration(actor, {
+        projectId: input.projectId,
+        sourceTaskId: track.trackId,
+        handlerKey: "core.text",
+        taskType: "text",
+        payload: {
+          operation: "video_prompt",
+          projectId: input.projectId,
+          targetId: track.trackId,
+          model: "universalAi",
+          prompt: "",
+          videoModel: input.videoModel,
+          mode: input.mode,
+          references,
+        },
+        idempotencyKey: `video-prompt:${requestId}:${track.trackId}`,
+      }, trx);
+      items.push({ jobId: job.id, targetId: track.trackId, status: "queued" });
     }
     return items;
   });

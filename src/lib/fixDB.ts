@@ -43,12 +43,18 @@ export async function migrateGroupOwnership(knex: Knex): Promise<void> {
     table.text("requestId");
     table.integer("createdAt").notNullable();
   });
+  await ensureTable(knex, "o_imageFlow", (table) => {
+    table.integer("id").notNullable().primary();
+    table.integer("projectId");
+    table.text("flowData").notNullable();
+  });
 
   await addColumn(knex, "o_user", "groupId", "integer");
   await addColumn(knex, "o_project", "ownerUserId", "integer");
   await addColumn(knex, "o_project", "groupId", "integer");
   await addColumn(knex, "o_tasks", "ownerUserId", "integer");
   await addColumn(knex, "o_tasks", "groupId", "integer");
+  await addColumn(knex, "o_imageFlow", "projectId", "integer");
 
   const now = Date.now();
   const pendingName = "待分配";
@@ -135,6 +141,19 @@ export async function migrateGroupOwnership(knex: Knex): Promise<void> {
     if (task.ownerUserId == null && project.ownerUserId != null) patch.ownerUserId = Number(project.ownerUserId);
     if (task.groupId == null && project.groupId != null) patch.groupId = Number(project.groupId);
     if (Object.keys(patch).length) await knex("o_tasks").where({ id: task.id }).update(patch);
+  }
+
+  const flowSources: Array<[string, string]> = [
+    ["o_assets", "flowId"],
+    ["o_storyboard", "flowId"],
+  ];
+  for (const [table, flowColumn] of flowSources) {
+    if (!(await knex.schema.hasTable(table))) continue;
+    if (!(await knex.schema.hasColumn(table, flowColumn)) || !(await knex.schema.hasColumn(table, "projectId"))) continue;
+    const rows = await knex(table).whereNotNull(flowColumn).whereNotNull("projectId").select(`${flowColumn} as flowId`, "projectId");
+    for (const row of rows) {
+      await knex("o_imageFlow").where({ id: row.flowId }).whereNull("projectId").update({ projectId: row.projectId });
+    }
   }
 }
 

@@ -15,6 +15,7 @@ import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
 import { requireAuth, requireRole } from "@/middleware/auth";
+import { requireScopedProductionAccess } from "@/middleware/projectAccess";
 
 const app = express();
 const server = http.createServer(app);
@@ -150,6 +151,8 @@ export default async function startServe(randomPort: Boolean = false) {
   }
 
   app.use(requireAuth);
+
+  app.use(requireScopedProductionAccess);
 
   app.use("/api/admin", requireRole("super_admin", "admin"));
 

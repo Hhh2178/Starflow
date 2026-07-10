@@ -1,34 +1,22 @@
-import jwt from "jsonwebtoken";
 import u from "@/utils";
 import { Namespace, Socket } from "socket.io";
 import * as agent from "@/agents/productionAgent/index";
 import ResTool from "@/socket/resTool";
-
-async function verifyToken(rawToken: string): Promise<Boolean> {
-  const setting = await u.db("o_setting").where("key", "tokenKey").select("value").first();
-  if (!setting) return false;
-  const { value: tokenKey } = setting;
-  if (!rawToken) return false;
-  const token = rawToken.replace("Bearer ", "");
-  try {
-    jwt.verify(token, tokenKey as string);
-    return true;
-  } catch (err) {
-    return false;
-  }
-}
+import { authenticateSocketProject, isSocketIsolationKeyValid } from "@/socket/auth";
 
 export default (nsp: Namespace) => {
   nsp.on("connection", async (socket: Socket) => {
     const token = socket.handshake.auth.token;
-    if (!token || !(await verifyToken(token))) {
-      console.log("[productionAgent] 连接失败，token无效");
+    let projectId = Number(socket.handshake.auth.projectId);
+    const initialScriptId = socket.handshake.auth.scriptId == null ? undefined : Number(socket.handshake.auth.scriptId);
+    if (!token || !(await authenticateSocketProject(token, projectId, initialScriptId))) {
+      socket.emit("error", { message: "项目不存在或当前账号无权访问" });
       socket.disconnect();
       return;
     }
     let isolationKey = socket.handshake.auth.isolationKey;
-    if (!isolationKey) {
-      console.log("[productionAgent] 连接失败，缺少 isolationKey");
+    if (!isSocketIsolationKeyValid(projectId, isolationKey)) {
+      socket.emit("error", { message: "项目不存在或当前账号无权访问" });
       socket.disconnect();
       return;
     }
@@ -36,8 +24,8 @@ export default (nsp: Namespace) => {
     console.log("[productionAgent] 已连接:", socket.id);
 
     let resTool = new ResTool(socket, {
-      projectId: socket.handshake.auth.projectId,
-      scriptId: socket.handshake.auth.scriptId,
+      projectId,
+      scriptId: initialScriptId,
     });
     let abortController: AbortController | null = null;
 
@@ -46,7 +34,13 @@ export default (nsp: Namespace) => {
       thinlLevel: 0,
     };
 
-    socket.on("updateContext", (data: { isolationKey: string; projectId: number; scriptId: number }, callback) => {
+    socket.on("updateContext", async (data: { isolationKey: string; projectId: number; scriptId: number }, callback) => {
+      if (!(await authenticateSocketProject(token, data.projectId, data.scriptId)) || !isSocketIsolationKeyValid(data.projectId, data.isolationKey)) {
+        socket.emit("error", { message: "项目不存在或当前账号无权访问" });
+        callback?.({ success: false, message: "项目不存在或当前账号无权访问" });
+        return;
+      }
+      projectId = data.projectId;
       isolationKey = data.isolationKey;
       resTool = new ResTool(socket, {
         projectId: data.projectId,

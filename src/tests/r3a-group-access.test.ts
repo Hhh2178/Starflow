@@ -1,10 +1,52 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import knex, { Knex } from "knex";
 import initDB from "@/lib/initDB";
 import * as fixDBModule from "@/lib/fixDB";
 import { hashPassword } from "@/utils/password";
 
 type GroupOwnershipMigration = (db: Knex) => Promise<void>;
+
+function assertRouteAccessMatrix(): void {
+  const routeRoot = path.resolve("src/routes");
+  const guardedDirectories = ["novel", "script", "scriptAgent", "assets", "assetsGenerate", "cornerScape", "production", "general", "project", "task"];
+  const policySource = fs.readFileSync(path.resolve("src/middleware/projectAccess.ts"), "utf8");
+  const explicitRouteGuards = new Set([
+    "/api/project/addProject",
+    "/api/project/delProject",
+    "/api/project/editProject",
+    "/api/project/getProject",
+    "/api/project/getModelDetails",
+    "/api/project/getVisualManual",
+    "/api/project/queryDirectorManual",
+    "/api/project/visualManual",
+    "/api/task/getProject",
+    "/api/task/getTaskApi",
+    "/api/task/getTaskCategories",
+    "/api/task/taskDetails",
+  ]);
+  const contextField = /\b(projectId|novelId|novelIds|scriptId|scriptIds|episodesId|assetId|assetIds|assetsId|assetsIds|storyboardId|storyboardIds|videoId|videoIds|trackId|trackIds|taskId|taskIds|flowId)\s*:/;
+  const missing: string[] = [];
+
+  const visit = (directory: string) => {
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const absolute = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        visit(absolute);
+        continue;
+      }
+      if (!entry.name.endsWith(".ts")) continue;
+      const relative = path.relative(routeRoot, absolute).replace(/\\/g, "/").replace(/\.ts$/, "");
+      const route = `/api/${relative}`;
+      const source = fs.readFileSync(absolute, "utf8");
+      if (!contextField.test(source) && !policySource.includes(`"${route}"`) && !explicitRouteGuards.has(route)) missing.push(route);
+    }
+  };
+
+  for (const directory of guardedDirectories) visit(path.join(routeRoot, directory));
+  assert.deepEqual(missing, [], `routes missing access policy: ${missing.join(", ")}`);
+}
 
 function createTestDB(): Knex {
   return knex({
@@ -35,6 +77,7 @@ async function assertRequiredSchema(db: Knex): Promise<void> {
     ["o_project", "groupId"],
     ["o_tasks", "ownerUserId"],
     ["o_tasks", "groupId"],
+    ["o_imageFlow", "projectId"],
   ] as const) {
     assert.equal(await db.schema.hasColumn(table, column), true, `${table}.${column} must exist`);
   }
@@ -300,6 +343,8 @@ async function testAdminSession(): Promise<void> {
   let groupBId: number | null = null;
   let userIds: number[] = [];
   let projectIds: number[] = [];
+  let taskIds: number[] = [];
+  let resourceIds: Record<string, number> | null = null;
 
   try {
     const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
@@ -457,6 +502,104 @@ async function testAdminSession(): Promise<void> {
     assert.deepEqual((await visibleProjectIds(adminToken)).sort(), [projectIds[0], projectIds[1]].sort());
     assert.deepEqual(await visibleProjectIds(adminOtherGroupToken), [projectIds[2]]);
 
+    const taskIdBase = Date.now() + 1000;
+    taskIds = [taskIdBase, taskIdBase + 1, taskIdBase + 2];
+    await u.db("o_tasks").insert([
+      {
+        id: taskIds[0], projectId: projectIds[0], ownerUserId: userIds[1], groupId,
+        taskClass: `task-a-${suffix}`, state: "completed", startTime: now,
+      },
+      {
+        id: taskIds[1], projectId: projectIds[1], ownerUserId: projectB.ownerUserId, groupId,
+        taskClass: `task-b-${suffix}`, state: "completed", startTime: now,
+      },
+      {
+        id: taskIds[2], projectId: projectIds[2], ownerUserId: userIds[4], groupId: groupBId,
+        taskClass: `task-c-${suffix}`, state: "completed", startTime: now,
+      },
+    ]);
+
+    const visibleTaskIds = async (token: string): Promise<number[]> => {
+      const result = await request(baseUrl, "/api/task/getTaskApi", token, {
+        method: "POST",
+        body: JSON.stringify({ page: 1, limit: 20 }),
+      });
+      assert.equal(result.status, 200);
+      return result.body.data.data.map((task: any) => Number(task.id)).filter((id: number) => taskIds.includes(id));
+    };
+    assert.deepEqual(await visibleTaskIds(creatorToken), [taskIds[0]]);
+    assert.deepEqual((await visibleTaskIds(adminToken)).sort(), [taskIds[0], taskIds[1]].sort());
+    assert.deepEqual(await visibleTaskIds(adminOtherGroupToken), [taskIds[2]]);
+
+    const taskProjects = await request(baseUrl, "/api/task/getProject", adminToken, { method: "POST", body: "{}" });
+    assert.equal(taskProjects.status, 200);
+    const taskProjectIds = taskProjects.body.data.map((project: any) => Number(project.id));
+    assert.equal(taskProjectIds.includes(projectIds[2]), false);
+    const taskCategories = await request(baseUrl, "/api/task/getTaskCategories", adminToken, { method: "POST", body: "{}" });
+    assert.equal(taskCategories.status, 200);
+    assert.equal(taskCategories.body.data.some((item: any) => item.taskClass === `task-c-${suffix}`), false);
+    const crossGroupTaskDetail = await request(baseUrl, "/api/task/taskDetails", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ taskId: taskIds[2] }),
+    });
+    assert.equal(crossGroupTaskDetail.status, 404);
+
+    const resourceIdBase = Date.now() + 5000;
+    resourceIds = {
+      novel: resourceIdBase,
+      script: resourceIdBase + 1,
+      asset: resourceIdBase + 2,
+      image: resourceIdBase + 3,
+      storyboard: resourceIdBase + 4,
+      track: resourceIdBase + 5,
+      video: resourceIdBase + 6,
+    };
+    await u.db("o_novel").insert({ id: resourceIds.novel, projectId: projectIds[2], chapter: "外组原文", chapterData: "不可见" });
+    await u.db("o_script").insert({ id: resourceIds.script, projectId: projectIds[2], name: "外组剧本", content: "不可见" });
+    await u.db("o_assets").insert({ id: resourceIds.asset, projectId: projectIds[2], name: "外组资产", describe: "不可见" });
+    await u.db("o_image").insert({ id: resourceIds.image, assetsId: resourceIds.asset, state: "已完成" });
+    await u.db("o_storyboard").insert({ id: resourceIds.storyboard, projectId: projectIds[2], scriptId: resourceIds.script, prompt: "原提示" });
+    await u.db("o_videoTrack").insert({ id: resourceIds.track, projectId: projectIds[2], scriptId: resourceIds.script, prompt: "原视频提示" });
+    await u.db("o_video").insert({ id: resourceIds.video, projectId: projectIds[2], scriptId: resourceIds.script, videoTrackId: resourceIds.track });
+
+    const crossGroupNovelList = await request(baseUrl, "/api/novel/getNovelData", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ projectId: projectIds[2] }),
+    });
+    assert.equal(crossGroupNovelList.status, 404);
+
+    const deniedResourceMutations = [
+      ["/api/novel/updateNovel", { id: resourceIds.novel, index: 1, reel: "1", chapter: "越权", chapterData: "越权", event: "" }],
+      ["/api/script/updateScript", { id: resourceIds.script, name: "越权", content: "越权", assets: [] }],
+      ["/api/assets/updateAssets", { id: resourceIds.asset, name: "越权", describe: "越权" }],
+      ["/api/assets/delImage", { id: resourceIds.image }],
+      ["/api/production/storyboard/editStoryboardInfo", { id: resourceIds.storyboard, prompt: "越权", videoDesc: "越权" }],
+      ["/api/production/workbench/updateVideoPrompt", { id: resourceIds.track, prompt: "越权" }],
+    ] as const;
+    for (const [path, body] of deniedResourceMutations) {
+      const result = await request(baseUrl, path, adminToken, { method: "POST", body: JSON.stringify(body) });
+      assert.equal(result.status, 404, `${path} must hide cross-group resources`);
+    }
+    assert.equal((await u.db("o_novel").where("id", resourceIds.novel).select("chapter").first())?.chapter, "外组原文");
+    assert.equal((await u.db("o_script").where("id", resourceIds.script).select("name").first())?.name, "外组剧本");
+    assert.equal((await u.db("o_assets").where("id", resourceIds.asset).select("name").first())?.name, "外组资产");
+    assert.equal((await u.db("o_image").where("id", resourceIds.image).first())?.id, resourceIds.image);
+    assert.equal((await u.db("o_storyboard").where("id", resourceIds.storyboard).select("prompt").first())?.prompt, "原提示");
+    assert.equal((await u.db("o_videoTrack").where("id", resourceIds.track).select("prompt").first())?.prompt, "原视频提示");
+
+    const { authenticateSocketProject } = await import("@/socket/auth");
+    assert.equal(await authenticateSocketProject(creatorToken, projectIds[2]), null);
+    const socketActor = await authenticateSocketProject(creatorToken, projectIds[0]);
+    assert.equal(socketActor?.id, userIds[1]);
+    assert.equal(socketActor?.groupId, groupId);
+    assert.equal(await authenticateSocketProject(creatorToken, projectIds[0], resourceIds.script), null);
+
+    const adminGlobalManualMutation = await request(baseUrl, "/api/project/deleteVisualManual", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ name: `不存在-${suffix}` }),
+    });
+    assert.equal(adminGlobalManualMutation.status, 403);
+
     const crossGroupEdit = await request(baseUrl, "/api/project/editProject", adminToken, {
       method: "POST",
       body: JSON.stringify({ ...projectInput("不可见项目"), id: projectIds[2] }),
@@ -527,6 +670,16 @@ async function testAdminSession(): Promise<void> {
     assert.ok(allGroups.body.data.some((group: any) => group.id === groupBId));
   } finally {
     if (baseUrl) await closeServe();
+    if (resourceIds) {
+      await u.db("o_video").where("id", resourceIds.video).delete();
+      await u.db("o_videoTrack").where("id", resourceIds.track).delete();
+      await u.db("o_storyboard").where("id", resourceIds.storyboard).delete();
+      await u.db("o_image").where("id", resourceIds.image).delete();
+      await u.db("o_assets").where("id", resourceIds.asset).delete();
+      await u.db("o_script").where("id", resourceIds.script).delete();
+      await u.db("o_novel").where("id", resourceIds.novel).delete();
+    }
+    if (taskIds.length) await u.db("o_tasks").whereIn("id", taskIds).delete();
     if (projectIds.length) await u.db("o_project").whereIn("id", projectIds).delete();
     await u.db("o_user").whereIn("name", [...createdCreatorNames, forbiddenAdminName]).delete();
     if (userIds.length) await u.db("o_user").whereIn("id", userIds).delete();
@@ -536,6 +689,7 @@ async function testAdminSession(): Promise<void> {
 }
 
 async function main(): Promise<void> {
+  assertRouteAccessMatrix();
   const migration = (fixDBModule as typeof fixDBModule & {
     migrateGroupOwnership?: GroupOwnershipMigration;
   }).migrateGroupOwnership;

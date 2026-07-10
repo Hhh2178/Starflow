@@ -679,6 +679,7 @@ export default async (
       name: "o_imageFlow",
       builder: (table) => {
         table.integer("id").notNullable();
+        table.integer("projectId");
         table.text("flowData").notNullable();
         table.primary(["id"]);
         table.unique(["id"]);

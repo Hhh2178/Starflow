@@ -1,4 +1,4 @@
-// @db-hash 3490f6f9515bf06af28aec36e0f71273
+// @db-hash 90b75c183351b6bba5dfdce4c7629876
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -113,6 +113,7 @@ export interface o_image {
 export interface o_imageFlow {
   'flowData': string;
   'id'?: number;
+  'projectId'?: number | null;
 }
 export interface o_modelPrompt {
   'fileName'?: string | null;

@@ -8,11 +8,12 @@ const router = express.Router();
 export default router.post(
   "/",
   validateFields({
+    projectId: z.number(),
     edges: z.any(),
     nodes: z.any(),
   }),
   async (req, res) => {
-    const { edges, nodes } = req.body;
+    const { projectId, edges, nodes } = req.body;
     nodes.forEach((node: any) => {
       if (node.type == "upload") {
         node.data.image = node.data.image ? u.replaceUrl(node.data.image) : "";
@@ -26,6 +27,7 @@ export default router.post(
       }
     });
     const [insertFlowId] = await u.db("o_imageFlow").insert({
+      projectId,
       flowData: JSON.stringify({ edges, nodes }),
     });
     return res.status(200).send(success({ id: insertFlowId }));

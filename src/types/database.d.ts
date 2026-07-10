@@ -1,4 +1,4 @@
-// @db-hash 90b75c183351b6bba5dfdce4c7629876
+// @db-hash e93b9eba8b6855913f31ab025855436b
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -80,6 +80,18 @@ export interface o_auditLog {
   'targetId'?: string | null;
   'targetType': string;
 }
+export interface o_concurrencyPolicy {
+  'createdAt': number;
+  'id'?: number;
+  'imageLimit': number;
+  'scopeId': number;
+  'scopeType': string;
+  'textLimit': number;
+  'totalLimit': number;
+  'updatedAt': number;
+  'updatedBy': number;
+  'videoLimit': number;
+}
 export interface o_event {
   'createTime'?: number | null;
   'detail'?: string | null;
@@ -90,6 +102,31 @@ export interface o_eventChapter {
   'eventId'?: number | null;
   'id'?: number;
   'novelId'?: number | null;
+}
+export interface o_generationJob {
+  'attemptCount'?: number;
+  'cancellationRequestedAt'?: number | null;
+  'errorCode'?: string | null;
+  'errorMessage'?: string | null;
+  'finishedAt'?: number | null;
+  'groupId': number;
+  'handlerKey': string;
+  'heartbeatAt'?: number | null;
+  'id'?: number;
+  'idempotencyKey': string;
+  'leaseExpiresAt'?: number | null;
+  'leaseOwner'?: string | null;
+  'ownerUserId': number;
+  'payloadJson': string;
+  'priority'?: number;
+  'projectId'?: number | null;
+  'providerRequestId'?: string | null;
+  'queuedAt': number;
+  'resultJson'?: string | null;
+  'sourceTaskId'?: number | null;
+  'startedAt'?: number | null;
+  'status': string;
+  'taskType': string;
 }
 export interface o_group {
   'adminUserId'?: number | null;
@@ -159,6 +196,23 @@ export interface o_prompt {
   'type'?: string | null;
   'useData'?: string | null;
 }
+export interface o_quotaAccount {
+  'balance'?: number;
+  'groupId'?: number | null;
+  'updatedAt': number;
+}
+export interface o_quotaLedger {
+  'actorUserId'?: number | null;
+  'amount': number;
+  'balanceAfter': number;
+  'balanceBefore': number;
+  'createdAt': number;
+  'entryType': string;
+  'groupId': number;
+  'id'?: number;
+  'reason': string;
+  'usageLedgerId'?: number | null;
+}
 export interface o_script {
   'content'?: string | null;
   'createTime'?: number | null;
@@ -222,6 +276,22 @@ export interface o_tasks {
   'state'?: string | null;
   'taskClass'?: string | null;
 }
+export interface o_usageLedger {
+  'createdAt': number;
+  'currency'?: string | null;
+  'estimatedCost'?: number | null;
+  'groupId': number;
+  'id'?: number;
+  'jobId': number;
+  'modelId'?: string | null;
+  'pricingSnapshotJson'?: string;
+  'projectId'?: number | null;
+  'providerId'?: string | null;
+  'result': string;
+  'taskType': string;
+  'unitJson'?: string;
+  'userId': number;
+}
 export interface o_user {
   'createdAt'?: number | null;
   'groupId'?: number | null;
@@ -272,8 +342,10 @@ export interface DB {
   "o_assets2Storyboard": o_assets2Storyboard;
   "o_assetsRole2Audio": o_assetsRole2Audio;
   "o_auditLog": o_auditLog;
+  "o_concurrencyPolicy": o_concurrencyPolicy;
   "o_event": o_event;
   "o_eventChapter": o_eventChapter;
+  "o_generationJob": o_generationJob;
   "o_group": o_group;
   "o_image": o_image;
   "o_imageFlow": o_imageFlow;
@@ -281,6 +353,8 @@ export interface DB {
   "o_novel": o_novel;
   "o_project": o_project;
   "o_prompt": o_prompt;
+  "o_quotaAccount": o_quotaAccount;
+  "o_quotaLedger": o_quotaLedger;
   "o_script": o_script;
   "o_scriptAssets": o_scriptAssets;
   "o_setting": o_setting;
@@ -288,6 +362,7 @@ export interface DB {
   "o_skillList": o_skillList;
   "o_storyboard": o_storyboard;
   "o_tasks": o_tasks;
+  "o_usageLedger": o_usageLedger;
   "o_user": o_user;
   "o_vendorConfig": o_vendorConfig;
   "o_video": o_video;

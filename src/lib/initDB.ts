@@ -79,6 +79,92 @@ export default async (
         table.integer("createdAt").notNullable();
       },
     },
+    {
+      name: "o_concurrencyPolicy",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.text("scopeType").notNullable();
+        table.integer("scopeId").notNullable();
+        table.integer("totalLimit").notNullable();
+        table.integer("textLimit").notNullable();
+        table.integer("imageLimit").notNullable();
+        table.integer("videoLimit").notNullable();
+        table.integer("updatedBy").notNullable();
+        table.integer("createdAt").notNullable();
+        table.integer("updatedAt").notNullable();
+        table.unique(["scopeType", "scopeId"]);
+      },
+    },
+    {
+      name: "o_generationJob",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("groupId").notNullable().index();
+        table.integer("ownerUserId").notNullable().index();
+        table.integer("projectId").index();
+        table.integer("sourceTaskId");
+        table.text("handlerKey").notNullable();
+        table.text("taskType").notNullable();
+        table.text("status").notNullable().index();
+        table.integer("priority").notNullable().defaultTo(0);
+        table.text("payloadJson").notNullable();
+        table.text("resultJson");
+        table.text("errorCode");
+        table.text("errorMessage");
+        table.text("idempotencyKey").notNullable().unique();
+        table.text("leaseOwner");
+        table.integer("leaseExpiresAt");
+        table.integer("heartbeatAt");
+        table.integer("attemptCount").notNullable().defaultTo(0);
+        table.text("providerRequestId");
+        table.integer("cancellationRequestedAt");
+        table.integer("queuedAt").notNullable();
+        table.integer("startedAt");
+        table.integer("finishedAt");
+      },
+    },
+    {
+      name: "o_usageLedger",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("jobId").notNullable().unique();
+        table.integer("groupId").notNullable().index();
+        table.integer("userId").notNullable();
+        table.integer("projectId");
+        table.text("providerId");
+        table.text("modelId");
+        table.text("taskType").notNullable();
+        table.text("unitJson").notNullable().defaultTo("{}");
+        table.decimal("estimatedCost", 18, 6);
+        table.text("currency");
+        table.text("pricingSnapshotJson").notNullable().defaultTo("{}");
+        table.text("result").notNullable();
+        table.integer("createdAt").notNullable();
+      },
+    },
+    {
+      name: "o_quotaAccount",
+      builder: (table) => {
+        table.integer("groupId").primary();
+        table.decimal("balance", 18, 6).notNullable().defaultTo(0);
+        table.integer("updatedAt").notNullable();
+      },
+    },
+    {
+      name: "o_quotaLedger",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("groupId").notNullable().index();
+        table.text("entryType").notNullable();
+        table.decimal("amount", 18, 6).notNullable();
+        table.decimal("balanceBefore", 18, 6).notNullable();
+        table.decimal("balanceAfter", 18, 6).notNullable();
+        table.integer("actorUserId");
+        table.integer("usageLedgerId");
+        table.text("reason").notNullable();
+        table.integer("createdAt").notNullable();
+      },
+    },
     //项目表
     {
       name: "o_project",

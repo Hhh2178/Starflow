@@ -157,6 +157,102 @@ export async function migrateGroupOwnership(knex: Knex): Promise<void> {
   }
 }
 
+export async function migrateGenerationQueue(knex: Knex): Promise<void> {
+  await ensureTable(knex, "o_concurrencyPolicy", (table) => {
+    table.increments("id").primary();
+    table.text("scopeType").notNullable();
+    table.integer("scopeId").notNullable();
+    table.integer("totalLimit").notNullable();
+    table.integer("textLimit").notNullable();
+    table.integer("imageLimit").notNullable();
+    table.integer("videoLimit").notNullable();
+    table.integer("updatedBy").notNullable();
+    table.integer("createdAt").notNullable();
+    table.integer("updatedAt").notNullable();
+    table.unique(["scopeType", "scopeId"]);
+  });
+  await ensureTable(knex, "o_generationJob", (table) => {
+    table.increments("id").primary();
+    table.integer("groupId").notNullable().index();
+    table.integer("ownerUserId").notNullable().index();
+    table.integer("projectId").index();
+    table.integer("sourceTaskId");
+    table.text("handlerKey").notNullable();
+    table.text("taskType").notNullable();
+    table.text("status").notNullable().index();
+    table.integer("priority").notNullable().defaultTo(0);
+    table.text("payloadJson").notNullable();
+    table.text("resultJson");
+    table.text("errorCode");
+    table.text("errorMessage");
+    table.text("idempotencyKey").notNullable().unique();
+    table.text("leaseOwner");
+    table.integer("leaseExpiresAt");
+    table.integer("heartbeatAt");
+    table.integer("attemptCount").notNullable().defaultTo(0);
+    table.text("providerRequestId");
+    table.integer("cancellationRequestedAt");
+    table.integer("queuedAt").notNullable();
+    table.integer("startedAt");
+    table.integer("finishedAt");
+  });
+  await ensureTable(knex, "o_usageLedger", (table) => {
+    table.increments("id").primary();
+    table.integer("jobId").notNullable().unique();
+    table.integer("groupId").notNullable().index();
+    table.integer("userId").notNullable();
+    table.integer("projectId");
+    table.text("providerId");
+    table.text("modelId");
+    table.text("taskType").notNullable();
+    table.text("unitJson").notNullable().defaultTo("{}");
+    table.decimal("estimatedCost", 18, 6);
+    table.text("currency");
+    table.text("pricingSnapshotJson").notNullable().defaultTo("{}");
+    table.text("result").notNullable();
+    table.integer("createdAt").notNullable();
+  });
+  await ensureTable(knex, "o_quotaAccount", (table) => {
+    table.integer("groupId").primary();
+    table.decimal("balance", 18, 6).notNullable().defaultTo(0);
+    table.integer("updatedAt").notNullable();
+  });
+  await ensureTable(knex, "o_quotaLedger", (table) => {
+    table.increments("id").primary();
+    table.integer("groupId").notNullable().index();
+    table.text("entryType").notNullable();
+    table.decimal("amount", 18, 6).notNullable();
+    table.decimal("balanceBefore", 18, 6).notNullable();
+    table.decimal("balanceAfter", 18, 6).notNullable();
+    table.integer("actorUserId");
+    table.integer("usageLedgerId");
+    table.text("reason").notNullable();
+    table.integer("createdAt").notNullable();
+  });
+
+  const now = Date.now();
+  const groupDefaults = { totalLimit: 4, textLimit: 3, imageLimit: 2, videoLimit: 1 };
+  const userDefaults = { totalLimit: 2, textLimit: 2, imageLimit: 1, videoLimit: 1 };
+  const groups = await knex("o_group").select("id");
+  for (const group of groups) {
+    const groupId = Number(group.id);
+    if (!(await knex("o_concurrencyPolicy").where({ scopeType: "group", scopeId: groupId }).first())) {
+      await knex("o_concurrencyPolicy").insert({ scopeType: "group", scopeId: groupId, ...groupDefaults, updatedBy: 1, createdAt: now, updatedAt: now });
+    }
+    if (!(await knex("o_quotaAccount").where({ groupId }).first())) {
+      await knex("o_quotaAccount").insert({ groupId, balance: 0, updatedAt: now });
+    }
+  }
+
+  const users = await knex("o_user").whereIn("role", ["admin", "creator"]).select("id");
+  for (const user of users) {
+    const userId = Number(user.id);
+    if (!(await knex("o_concurrencyPolicy").where({ scopeType: "user", scopeId: userId }).first())) {
+      await knex("o_concurrencyPolicy").insert({ scopeType: "user", scopeId: userId, ...userDefaults, updatedBy: 1, createdAt: now, updatedAt: now });
+    }
+  }
+}
+
 export default async (knex: Knex): Promise<void> => {
   const [{ default: u }, { default: db }] = await Promise.all([import("@/utils"), import("@/utils/db")]);
 
@@ -224,6 +320,7 @@ export default async (knex: Knex): Promise<void> => {
   }
 
   await migrateGroupOwnership(knex);
+  await migrateGenerationQueue(knex);
 
   // 添加新字段
   await addColumn(knex, "o_prompt", "useData", "text");

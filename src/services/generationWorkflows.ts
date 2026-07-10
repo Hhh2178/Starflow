@@ -24,6 +24,10 @@ export interface QueuedAssetImageItem extends QueuedWorkflowItem {
   imageId: number;
 }
 
+export interface EnqueueAssetImagesInput { projectId: number; assetIds: number[] }
+export interface EnqueueEditImageInput { projectId: number; model: string; prompt: string; referencePaths: string[]; size: "1K" | "2K" | "4K"; aspectRatio: string }
+export interface AddNovelInput { projectId: number; data: Array<{ index: number; reel: string; chapter: string; chapterData: string }> }
+
 export interface EnqueueStoryboardImagesInput {
   projectId: number;
   scriptId: number;
@@ -134,6 +138,12 @@ export async function enqueueAssetImageJob(
 ): Promise<QueuedAssetImageItem> {
   const resolvedConnection = await resolveConnection(connection);
   return inTransaction(resolvedConnection, async (trx) => {
+    const idempotencyKey = `asset-image:${requestId}:${input.assetId}`;
+    const existing = await trx("o_generationJob").where({ idempotencyKey }).first();
+    if (existing) {
+      const storedPayload = JSON.parse(String(existing.payloadJson));
+      return { jobId: Number(existing.id), targetId: input.assetId, imageId: Number(storedPayload.targetId), status: existing.status };
+    }
     const [project, asset] = await Promise.all([
       trx("o_project").where({ id: input.projectId }).select("id", "artStyle").first(),
       trx("o_assets").where({ id: input.assetId, projectId: input.projectId }).first(),
@@ -177,9 +187,65 @@ export async function enqueueAssetImageJob(
         size: input.size,
         aspectRatio: "16:9",
       },
-      idempotencyKey: `asset-image:${requestId}:${input.assetId}`,
+      idempotencyKey,
     }, trx);
-    return { jobId: job.id, targetId: input.assetId, imageId: Number(imageId), status: "queued" };
+    return { jobId: job.id, targetId: input.assetId, imageId: Number(imageId), status: job.status };
+  });
+}
+
+export async function enqueueAssetImageJobs(actor: AuthUser, input: EnqueueAssetImagesInput, requestId: string, connection?: WorkflowConnection): Promise<QueuedAssetImageItem[]> {
+  const resolvedConnection = await resolveConnection(connection);
+  return inTransaction(resolvedConnection, async (trx) => {
+    const assetIds = [...new Set(input.assetIds)];
+    if (assetIds.length === 0) throw new GenerationQueueError(422, "ASSET_REQUIRED", "至少需要一个资产");
+    const [project, assets] = await Promise.all([
+      trx("o_project").where({ id: input.projectId }).select("imageModel", "imageQuality").first(),
+      trx("o_assets").where({ projectId: input.projectId }).whereIn("id", assetIds).select("id"),
+    ]);
+    if (!project || assets.length !== assetIds.length) throw new GenerationQueueError(404, "ASSET_NOT_FOUND", "部分资产不存在或不属于当前项目");
+    if (!project.imageModel || !["1K", "2K", "4K"].includes(String(project.imageQuality))) throw new GenerationQueueError(422, "IMAGE_MODEL_REQUIRED", "项目尚未配置有效的图片模型或图片质量");
+    const items: QueuedAssetImageItem[] = [];
+    for (const assetId of assetIds) items.push(await enqueueAssetImageJob(actor, { projectId: input.projectId, assetId, model: String(project.imageModel), size: project.imageQuality, referenceResourceIds: [] }, requestId, trx));
+    return items;
+  });
+}
+
+export async function enqueueEditImageJob(actor: AuthUser, input: EnqueueEditImageInput, requestId: string, connection?: WorkflowConnection): Promise<QueuedWorkflowItem> {
+  for (const referencePath of input.referencePaths) {
+    if (!referencePath.startsWith("/") || referencePath.startsWith("//") || referencePath.split(/[\\/]+/).includes("..")) throw new GenerationQueueError(422, "EDIT_REFERENCE_INVALID", "工作流图片只能引用本项目已上传的本地文件");
+  }
+  const resolvedConnection = await resolveConnection(connection);
+  const job = await enqueueGeneration(actor, { projectId: input.projectId, handlerKey: "core.image", taskType: "image", payload: { operation: "edit", projectId: input.projectId, targetId: input.projectId, model: input.model, prompt: input.prompt, referencePaths: [...new Set(input.referencePaths)], size: input.size, aspectRatio: input.aspectRatio }, idempotencyKey: `edit-image:${requestId}` }, resolvedConnection);
+  return { jobId: job.id, targetId: input.projectId, status: job.status };
+}
+
+export async function addNovelAndEnqueueEventJobs(actor: AuthUser, input: AddNovelInput, requestId: string, connection?: WorkflowConnection): Promise<{ novelIds: number[]; items: QueuedWorkflowItem[] }> {
+  const resolvedConnection = await resolveConnection(connection);
+  return inTransaction(resolvedConnection, async (trx) => {
+    if (input.data.length === 0) throw new GenerationQueueError(422, "NOVEL_REQUIRED", "至少需要一个小说章节");
+    const replayed: QueuedWorkflowItem[] = [];
+    for (let index = 0; index < input.data.length; index += 1) {
+      const existing = await trx("o_generationJob").where({ idempotencyKey: `novel-add:${requestId}:${index}` }).first();
+      if (!existing) { replayed.length = 0; break; }
+      const payload = JSON.parse(String(existing.payloadJson));
+      replayed.push({ jobId: Number(existing.id), targetId: Number(payload.targetId), status: existing.status });
+    }
+    if (replayed.length === input.data.length) return { novelIds: replayed.map((item) => item.targetId), items: replayed };
+    if (replayed.length > 0) throw new GenerationQueueError(409, "NOVEL_REPLAY_INCOMPLETE", "小说导入请求状态不完整，请更换请求 ID 后重试");
+
+    const project = await trx("o_project").where({ id: input.projectId }).select("id").first();
+    if (!project) throw new GenerationQueueError(404, "PROJECT_NOT_FOUND", "项目不存在");
+    const last = await trx("o_novel").where({ projectId: input.projectId }).max({ chapterIndex: "chapterIndex" }).first();
+    let chapterIndex = Number(last?.chapterIndex ?? 0);
+    const novelIds: number[] = [];
+    const items: QueuedWorkflowItem[] = [];
+    for (let index = 0; index < input.data.length; index += 1) {
+      const chapter = input.data[index];
+      const [novelId] = await trx("o_novel").insert({ projectId: input.projectId, chapterIndex: ++chapterIndex, reel: chapter.reel, chapter: chapter.chapter, chapterData: chapter.chapterData, createTime: Date.now(), eventState: 0 });
+      const job = await enqueueGeneration(actor, { projectId: input.projectId, handlerKey: "core.text", taskType: "text", payload: { operation: "novel_events", projectId: input.projectId, targetId: Number(novelId), model: "universalAi", prompt: "" }, idempotencyKey: `novel-add:${requestId}:${index}` }, trx);
+      novelIds.push(Number(novelId)); items.push({ jobId: job.id, targetId: Number(novelId), status: job.status });
+    }
+    return { novelIds, items };
   });
 }
 

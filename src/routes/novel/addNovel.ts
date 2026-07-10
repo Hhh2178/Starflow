@@ -1,54 +1,23 @@
 import express from "express";
-import u from "@/utils";
+import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import { success } from "@/lib/responseFormat";
+import { sendAdminServiceError } from "@/lib/adminServiceError";
 import { validateFields } from "@/middleware/middleware";
-const router = express.Router();
+import { getAuthUser } from "@/middleware/auth";
+import { addNovelAndEnqueueEventJobs, type AddNovelInput, type QueuedWorkflowItem } from "@/services/generationWorkflows";
+import type { AuthUser } from "@/types/auth";
 
-// 新增原文数据
-export default router.post(
-  "/",
-  validateFields({
-    projectId: z.number(),
-    data: z.array(
-      z.object({
-        index: z.number(),
-        reel: z.string(),
-        chapter: z.string(),
-        chapterData: z.string(),
-      }),
-    ),
-  }),
-  async (req, res) => {
-    const { projectId, data } = req.body;
-    const totalNovelId = [];
-    const getLastChapterIndex = await u.db("o_novel").where("projectId", projectId).select("chapterIndex").orderBy("chapterIndex", "desc").first();
-    let lastChapterIndex = 0;
-    if (getLastChapterIndex) {
-      lastChapterIndex = getLastChapterIndex.chapterIndex!;
-    }
-    for (const item of data) {
-      const [id] = await u.db("o_novel").insert({
-        projectId,
-        chapterIndex: ++lastChapterIndex,
-        reel: item.reel,
-        chapter: item.chapter,
-        chapterData: item.chapterData,
-        createTime: Date.now(),
-        eventState: 0,
-      });
-      totalNovelId.push(id);
-    }
-    const chapterAllList = await u.db("o_novel").where("projectId", projectId).whereIn("id", totalNovelId);
-    const novelClass = new u.cleanNovel();
-    novelClass.emitter.on("item", async (item) => {
-      await u
-        .db("o_novel")
-        .where("id", item.id)
-        .update({ event: item.event, eventState: item.event ? 1 : -1, errorReason: item?.errReason ?? null });
-    });
-    novelClass.start(chapterAllList, projectId);
+type AddNovel = (actor: AuthUser, input: AddNovelInput, requestId: string) => Promise<{ novelIds: number[]; items: QueuedWorkflowItem[] }>;
 
-    res.status(200).send(success({ message: "新增原文成功" }));
-  },
-);
+export function createAddNovelRouter(addNovel: AddNovel = addNovelAndEnqueueEventJobs) {
+  const router = express.Router();
+  return router.post("/", validateFields({ projectId: z.number().int().positive(), data: z.array(z.object({ index: z.number(), reel: z.string(), chapter: z.string(), chapterData: z.string() })).min(1) }), async (req, res) => {
+    try {
+      const result = await addNovel(getAuthUser(req), req.body, String(req.headers["x-request-id"] || uuidv4()));
+      return res.status(200).send(success({ ...result, total: result.items.length, message: "原文已导入，事件提取已加入队列" }));
+    } catch (cause) { return sendAdminServiceError(res, cause); }
+  });
+}
+
+export default createAddNovelRouter();

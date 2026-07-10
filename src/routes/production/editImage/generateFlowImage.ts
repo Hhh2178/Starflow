@@ -1,61 +1,31 @@
 import express from "express";
-import u from "@/utils";
+import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
 import { error, success } from "@/lib/responseFormat";
+import { sendAdminServiceError } from "@/lib/adminServiceError";
 import { validateFields } from "@/middleware/middleware";
-import axios from "axios";
-const router = express.Router();
+import { getAuthUser } from "@/middleware/auth";
+import { enqueueEditImageJob, type EnqueueEditImageInput, type QueuedWorkflowItem } from "@/services/generationWorkflows";
+import type { AuthUser } from "@/types/auth";
 
-async function urlToBase64(imageUrl: string): Promise<string> {
-  if (imageUrl.startsWith("/oss/")) {
-    return await u.oss.getImageBase64(u.replaceUrl(imageUrl).replace("/smallImage", ""));
-  }
-  imageUrl = await u.oss.getFileUrl(u.replaceUrl(imageUrl));
-  const response = await axios.get(imageUrl, { responseType: "arraybuffer" });
-  const contentType = response.headers["content-type"] || "image/png";
-  const base64 = Buffer.from(response.data, "binary").toString("base64");
-  return `data:${contentType};base64,${base64}`;
+type EnqueueEdit = (actor: AuthUser, input: EnqueueEditImageInput, requestId: string) => Promise<QueuedWorkflowItem>;
+
+function localReferencePath(value: string): string | null {
+  if (!value.startsWith("/oss/") || value.includes("..")) return null;
+  const path = value.slice(4).replace("/smallImage", "");
+  return path.startsWith("/") && !path.startsWith("//") ? path : null;
 }
-export default router.post(
-  "/",
-  validateFields({
-    model: z.string(),
-    references: z.array(z.string()).optional(),
-    quality: z.string(),
-    ratio: z.string(),
-    prompt: z.string(),
-    projectId: z.number(),
-  }),
-  async (req, res) => {
-    const { model, references = [], quality, ratio, prompt, projectId } = req.body;
-    try {
-      const imageClass = await u.Ai.Image(model).run(
-        {
-          prompt: prompt,
-          referenceList: await (async () => {
-            const list: { type: "image"; base64: string }[] = [];
-            for (const url of references) {
-              list.push({ type: "image" as const, base64: await urlToBase64(url) });
-            }
-            return list;
-          })(),
-          size: quality,
-          aspectRatio: ratio,
-        },
-        {
-          taskClass: "工作流图片生成",
-          describe: "工作流图片生成",
-          relatedObjects: JSON.stringify(req.body),
-          projectId: projectId,
-        },
-      );
-      const savePath = `${projectId}/workFlow/${u.uuid()}.jpg`;
-      await imageClass.save(savePath);
 
-      const url = await u.oss.getSmallImageUrl(savePath);
-      return res.status(200).send(success({ url }));
-    } catch (e) {
-      res.status(400).send(error(u.error(e).message));
-    }
-  },
-);
+export function createGenerateFlowImageRouter(enqueue: EnqueueEdit = enqueueEditImageJob) {
+  const router = express.Router();
+  return router.post("/", validateFields({ model: z.string().min(1), references: z.array(z.string()).optional(), quality: z.enum(["1K", "2K", "4K"]), ratio: z.string().min(1), prompt: z.string(), projectId: z.number().int().positive() }), async (req, res) => {
+    const referencePaths = (req.body.references ?? []).map(localReferencePath);
+    if (referencePaths.some((path: string | null) => path === null)) return res.status(400).send(error("工作流图片只能引用已上传的本地文件"));
+    try {
+      const item = await enqueue(getAuthUser(req), { projectId: req.body.projectId, model: req.body.model, prompt: req.body.prompt, referencePaths: referencePaths as string[], size: req.body.quality, aspectRatio: req.body.ratio }, String(req.headers["x-request-id"] || uuidv4()));
+      return res.status(200).send(success({ ...item, message: "已加入工作流图片生成队列" }));
+    } catch (cause) { return sendAdminServiceError(res, cause); }
+  });
+}
+
+export default createGenerateFlowImageRouter();

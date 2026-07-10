@@ -30,6 +30,7 @@
     "test:r3d": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3d-admin-operations.test.ts",
     "test:r3e": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3e-admin-monitoring.test.ts",
     "test:r3f": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3f-acceptance-fixture.test.ts",
+    "test:r3g": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3g-generation-entrypoints.test.ts",
     "seed:acceptance": "cross-env NODE_ENV=dev tsx scripts/seedAcceptance.ts",
     "build": "cross-env NODE_ENV=prod tsx scripts/build.ts",
     "pack": "electron-builder --dir",

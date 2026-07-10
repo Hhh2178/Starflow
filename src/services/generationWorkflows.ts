@@ -1,4 +1,5 @@
 import type { Knex } from "knex";
+import { v4 as uuidv4 } from "uuid";
 import type { AuthUser } from "@/types/auth";
 import { enqueueGeneration, GenerationQueueError } from "@/services/generationQueue";
 
@@ -27,6 +28,30 @@ export interface EnqueueStoryboardImagesInput {
   scriptId: number;
   storyboardIds: number[];
   compulsory: boolean;
+}
+
+export interface VideoResourceReference {
+  kind: "asset" | "storyboard";
+  id: number;
+}
+
+export interface EnqueueVideosInput {
+  projectId: number;
+  scriptId: number;
+  model: string;
+  mode: string | string[];
+  resolution: string;
+  audio: boolean;
+  tracks: Array<{
+    trackId: number;
+    prompt: string;
+    duration: number;
+    references: VideoResourceReference[];
+  }>;
+}
+
+export interface QueuedVideoItem extends QueuedWorkflowItem {
+  videoId: number;
 }
 
 const assetLabels: Record<string, string> = {
@@ -213,6 +238,79 @@ export async function enqueueStoryboardImageJobs(
         idempotencyKey: `storyboard-image:${requestId}:${targetId}`,
       }, trx);
       items.push({ jobId: job.id, targetId, status: "queued" });
+    }
+    return items;
+  });
+}
+
+export async function enqueueVideoJobs(
+  actor: AuthUser,
+  input: EnqueueVideosInput,
+  requestId: string,
+  connection?: WorkflowConnection,
+): Promise<QueuedVideoItem[]> {
+  const resolvedConnection = await resolveConnection(connection);
+  return inTransaction(resolvedConnection, async (trx) => {
+    const project = await trx("o_project").where({ id: input.projectId }).select("videoRatio").first();
+    const trackIds = [...new Set(input.tracks.map((track) => track.trackId))];
+    const tracks = await trx("o_videoTrack")
+      .where({ projectId: input.projectId, scriptId: input.scriptId })
+      .whereIn("id", trackIds)
+      .select("id");
+    if (!project || tracks.length !== trackIds.length) {
+      throw new GenerationQueueError(404, "VIDEO_TRACK_NOT_FOUND", "部分视频轨道不存在或不属于当前项目");
+    }
+
+    for (const track of input.tracks) {
+      for (const reference of track.references) {
+        const resource = reference.kind === "asset"
+          ? await trx("o_assets")
+            .join("o_image", "o_image.id", "o_assets.imageId")
+            .where("o_assets.id", reference.id)
+            .where("o_assets.projectId", input.projectId)
+            .whereNotNull("o_image.filePath")
+            .first()
+          : await trx("o_storyboard")
+            .where({ id: reference.id, projectId: input.projectId })
+            .whereNotNull("filePath")
+            .first();
+        if (!resource) throw new GenerationQueueError(404, "VIDEO_REFERENCE_NOT_FOUND", "视频参考资源不存在或不属于当前项目");
+      }
+    }
+
+    const aspectRatio = project.videoRatio === "9:16" ? "9:16" : "16:9";
+    const items: QueuedVideoItem[] = [];
+    for (const track of input.tracks) {
+      const videoPath = `/${input.projectId}/video/${uuidv4()}.mp4`;
+      const [videoId] = await trx("o_video").insert({
+        filePath: videoPath,
+        time: Date.now(),
+        state: "生成中",
+        scriptId: input.scriptId,
+        projectId: input.projectId,
+        videoTrackId: track.trackId,
+      });
+      const job = await enqueueGeneration(actor, {
+        projectId: input.projectId,
+        handlerKey: "core.video",
+        taskType: "video",
+        payload: {
+          operation: "track",
+          projectId: input.projectId,
+          targetId: Number(videoId),
+          model: input.model,
+          prompt: track.prompt,
+          referenceResourceIds: [],
+          referenceResources: track.references,
+          duration: track.duration,
+          resolution: input.resolution,
+          aspectRatio,
+          audio: input.audio,
+          mode: input.mode,
+        },
+        idempotencyKey: `video:${requestId}:${track.trackId}`,
+      }, trx);
+      items.push({ jobId: job.id, targetId: track.trackId, videoId: Number(videoId), status: "queued" });
     }
     return items;
   });

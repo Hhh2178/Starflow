@@ -23,7 +23,7 @@ import type { GenerationJobHandler } from "@/types/generationQueue";
 import { createTextGenerationHandler } from "@/jobs/handlers/textGeneration";
 import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
-import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs } from "@/services/generationWorkflows";
+import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
@@ -306,6 +306,29 @@ async function testQueueAndAtomicClaim(db: ReturnType<typeof knex>): Promise<voi
     { operation: "storyboard", targetId: 701, referenceResourceIds: [] },
   );
   await db("o_generationJob").where({ id: storyboardJobs[0].jobId }).del();
+
+  await db("o_videoTrack").insert({ id: 901, projectId: 1001, scriptId: 801, prompt: "camera move", duration: 5 });
+  const videoJobs = await enqueueVideoJobs(
+    creatorA,
+    {
+      projectId: 1001,
+      scriptId: 801,
+      model: "1:video-model",
+      mode: "text",
+      resolution: "1080p",
+      audio: false,
+      tracks: [{ trackId: 901, prompt: "camera move", duration: 5, references: [] }],
+    },
+    "request-video-1",
+    db,
+  );
+  assert.equal(videoJobs[0].status, "queued");
+  const videoPayload = JSON.parse((await db("o_generationJob").where({ id: videoJobs[0].jobId }).first()).payloadJson);
+  assert.deepEqual(
+    { operation: videoPayload.operation, targetId: videoPayload.targetId, referenceResources: videoPayload.referenceResources },
+    { operation: "track", targetId: videoJobs[0].videoId, referenceResources: [] },
+  );
+  await db("o_generationJob").where({ id: videoJobs[0].jobId }).del();
 
   for (const payload of [
     { providerKey: "secret" },

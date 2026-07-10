@@ -12,10 +12,15 @@ export const videoGenerationPayloadSchema = z.object({
   model: z.string().min(1),
   prompt: z.string(),
   referenceResourceIds: z.array(z.number().int().positive()).default([]),
+  referenceResources: z.array(z.object({
+    kind: z.enum(["asset", "storyboard"]),
+    id: z.number().int().positive(),
+  }).strict()).default([]),
   duration: z.number().positive(),
   resolution: z.string().min(1),
   aspectRatio: z.enum(["16:9", "9:16"]),
   audio: z.boolean().default(false),
+  mode: z.union([z.string(), z.array(z.string())]).default("text"),
 }).strict();
 
 export type VideoGenerationPayload = z.infer<typeof videoGenerationPayloadSchema>;

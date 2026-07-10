@@ -67,3 +67,8 @@ export interface GenerationJobHandler<TPayload = unknown, TResult = unknown> {
   ): Promise<GenerationExecutionResult<TResult>>;
   cancel?(context: GenerationExecutionContext): Promise<void>;
 }
+
+export type ReferenceList =
+  | { type: "image"; base64: string }
+  | { type: "audio"; base64: string }
+  | { type: "video"; base64: string };

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import knex, { Knex } from "knex";
 import initDB from "@/lib/initDB";
 import * as fixDBModule from "@/lib/fixDB";
+import { hashPassword } from "@/utils/password";
 
 type GroupOwnershipMigration = (db: Knex) => Promise<void>;
 
@@ -240,6 +241,116 @@ async function testPreassignedMigration(migrate: GroupOwnershipMigration): Promi
   });
 }
 
+type ApiResult = { status: number; body: any };
+
+async function request(baseUrl: string, path: string, token?: string, init: RequestInit = {}): Promise<ApiResult> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: token } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  return { status: response.status, body: await response.json().catch(() => null) };
+}
+
+async function login(baseUrl: string, username: string, password: string): Promise<string> {
+  const result = await request(baseUrl, "/api/login/login", undefined, {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+  assert.equal(result.status, 200, `login failed for ${username}`);
+  assert.equal(typeof result.body?.data?.token, "string");
+  return result.body.data.token;
+}
+
+async function testAdminSession(): Promise<void> {
+  const [{ default: startServe, closeServe }, { default: u }] = await Promise.all([import("@/app"), import("@/utils")]);
+  const suffix = `${Date.now().toString(36)}${Math.random().toString(16).slice(2, 6)}`;
+  const adminName = `r3a-admin-${suffix}`;
+  const creatorName = `r3a-creator-${suffix}`;
+  const orphanName = `r3a-orphan-${suffix}`;
+  const password = "TempPass123";
+  const now = Date.now();
+  let baseUrl = "";
+  let groupId: number | null = null;
+  let userIds: number[] = [];
+
+  try {
+    const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
+    const firstUserId = Number(maxUser?.maxId ?? 0) + 1;
+    userIds = [firstUserId, firstUserId + 1, firstUserId + 2];
+    const [createdGroupId] = await u.db("o_group").insert({
+      name: `R3A ${suffix}`,
+      adminUserId: userIds[0],
+      creatorLimit: 5,
+      status: "enabled",
+      createdAt: now,
+      updatedAt: now,
+    });
+    groupId = Number(createdGroupId);
+    await u.db("o_user").insert([
+      {
+        id: userIds[0],
+        name: adminName,
+        passwordHash: hashPassword(password),
+        role: "admin",
+        status: "enabled",
+        groupId,
+        createdAt: now,
+        updatedAt: now,
+        mustChangePassword: false,
+      },
+      {
+        id: userIds[1],
+        name: creatorName,
+        passwordHash: hashPassword(password),
+        role: "creator",
+        status: "enabled",
+        groupId,
+        createdAt: now,
+        updatedAt: now,
+        mustChangePassword: false,
+      },
+    ]);
+
+    const port = await startServe(true);
+    baseUrl = `http://127.0.0.1:${port}`;
+    await u.db("o_user").insert({
+      id: userIds[2],
+      name: orphanName,
+      passwordHash: hashPassword(password),
+      role: "admin",
+      status: "enabled",
+      groupId: null,
+      createdAt: now,
+      updatedAt: now,
+      mustChangePassword: false,
+    });
+    const adminToken = await login(baseUrl, adminName, password);
+    const creatorToken = await login(baseUrl, creatorName, password);
+    const orphanToken = await login(baseUrl, orphanName, password);
+
+    const adminSession = await request(baseUrl, "/api/admin/auth/session", adminToken);
+    assert.equal(adminSession.status, 200);
+    assert.equal(adminSession.body.data.role, "admin");
+    assert.equal(adminSession.body.data.groupId, groupId);
+    assert.equal(adminSession.body.data.groupName, `R3A ${suffix}`);
+
+    const creatorSession = await request(baseUrl, "/api/admin/auth/session", creatorToken);
+    assert.equal(creatorSession.status, 403);
+
+    const orphanSession = await request(baseUrl, "/api/setting/loginConfig/me", orphanToken);
+    assert.equal(orphanSession.status, 403);
+    assert.match(orphanSession.body.message, /尚未分配分组/);
+  } finally {
+    if (baseUrl) await closeServe();
+    if (userIds.length) await u.db("o_user").whereIn("id", userIds).delete();
+    if (groupId !== null) await u.db("o_group").where("id", groupId).delete();
+  }
+}
+
 async function main(): Promise<void> {
   const migration = (fixDBModule as typeof fixDBModule & {
     migrateGroupOwnership?: GroupOwnershipMigration;
@@ -250,6 +361,7 @@ async function main(): Promise<void> {
   await testPreassignedMigration(migrate);
   await testLegacySchemaUpgrade(migrate);
   await testFreshSchema();
+  await testAdminSession();
 }
 
 main().then(

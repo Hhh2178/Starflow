@@ -6,6 +6,7 @@ export interface AuthUser {
   id: number;
   name: string;
   role: UserRole;
+  groupId: number | null;
 }
 
 export function normalizeRole(role: unknown, fallback: UserRole = "creator"): UserRole {

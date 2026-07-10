@@ -151,6 +151,8 @@ export default async function startServe(randomPort: Boolean = false) {
 
   app.use(requireAuth);
 
+  app.use("/api/admin", requireRole("super_admin", "admin"));
+
   const superAdminSettingPaths = [
     "/api/setting/vendorConfig",
     "/api/setting/modelMap",

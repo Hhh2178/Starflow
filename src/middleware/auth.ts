@@ -33,14 +33,21 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
     const decoded = jwt.verify(token, tokenKey) as Partial<AuthUser>;
     if (!decoded.id) return res.status(401).send({ message: "无效的token" });
 
-    const userRecord = await u.db("o_user").where("id", Number(decoded.id)).select("id", "name", "role", "status").first();
+    const userRecord = await u.db("o_user").where("id", Number(decoded.id)).select("id", "name", "role", "status", "groupId").first();
     if (!userRecord) return res.status(401).send({ message: "账号不存在" });
     if (userRecord.status === "disabled") return res.status(403).send({ message: "账号已停用，请联系管理员" });
+
+    const role = normalizeRole(userRecord.role, Number(userRecord.id) === 1 ? "super_admin" : "creator");
+    const groupId = userRecord.groupId == null ? null : Number(userRecord.groupId);
+    if (role !== "super_admin" && groupId === null) {
+      return res.status(403).send({ message: "账号尚未分配分组，请联系超级管理员" });
+    }
 
     (req as any).user = {
       id: Number(userRecord.id),
       name: String(userRecord.name),
-      role: normalizeRole(userRecord.role, Number(userRecord.id) === 1 ? "super_admin" : "creator"),
+      role,
+      groupId,
     } satisfies AuthUser;
     next();
   } catch {

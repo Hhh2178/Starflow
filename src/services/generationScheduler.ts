@@ -1,6 +1,6 @@
 import type { Knex } from "knex";
 import { evaluateCapacity } from "@/services/concurrencyPolicy";
-import type { CapacityUsage, ConcurrencyLimit, GenerationTaskType } from "@/types/generationQueue";
+import type { CapacityUsage, ConcurrencyLimit, GenerationExecutionContext, GenerationTaskType } from "@/types/generationQueue";
 import type { GenerationJobRecord } from "@/services/generationQueue";
 import type { GenerationJobRegistry } from "@/jobs/registry";
 import { completeGenerationUsage } from "@/services/generationUsage";
@@ -254,15 +254,48 @@ export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJo
     return;
   }
 
+  if (job.cancellationRequestedAt != null) {
+    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
+      status: "cancelled",
+      finishedAt: now(),
+      errorCode: null,
+      errorMessage: null,
+      leaseOwner: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+    });
+    return;
+  }
+
   const controller = new AbortController();
+  let cancellationHookStarted = false;
+  let context: GenerationExecutionContext;
+  const propagateCancellation = async () => {
+    const current = await connection("o_generationJob")
+      .where({ id: jobId, status: "running" })
+      .select("cancellationRequestedAt")
+      .first();
+    if (!current || current.cancellationRequestedAt == null) return false;
+    if (!controller.signal.aborted) controller.abort();
+    if (handler.cancel && !cancellationHookStarted) {
+      cancellationHookStarted = true;
+      try {
+        await handler.cancel(context);
+      } catch {
+        // The AbortSignal remains authoritative when an optional Provider cancel hook fails.
+      }
+    }
+    return true;
+  };
   const heartbeat = async () => {
+    if (await propagateCancellation()) return;
     const timestamp = now();
     await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
       heartbeatAt: timestamp,
       leaseExpiresAt: timestamp + 30_000,
     });
   };
-  const context = {
+  context = {
     jobId,
     groupId: Number(job.groupId),
     ownerUserId: Number(job.ownerUserId),
@@ -283,10 +316,11 @@ export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJo
     providerCompleted = true;
     await completeGenerationUsage(jobId, execution.result, execution.metering, connection, now());
   } catch (error) {
+    const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
     await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: providerCompleted ? "needs_attention" : "failed",
-      errorCode: providerCompleted ? "ACCOUNTING_FAILED" : "HANDLER_EXECUTION_FAILED",
-      errorMessage: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      status: cancelled ? "cancelled" : providerCompleted ? "needs_attention" : "failed",
+      errorCode: cancelled ? null : providerCompleted ? "ACCOUNTING_FAILED" : "HANDLER_EXECUTION_FAILED",
+      errorMessage: cancelled ? null : (error instanceof Error ? error.message : String(error)).slice(0, 500),
       finishedAt: now(),
       leaseOwner: null,
       leaseExpiresAt: null,

@@ -6,6 +6,7 @@ import { executeCoreImageGeneration } from "@/jobs/handlers/coreImageExecutor";
 import { createVideoGenerationHandler, type VideoGenerationPayload } from "@/jobs/handlers/videoGeneration";
 import { executeCoreVideoGeneration } from "@/jobs/handlers/coreVideoExecutor";
 import type { GenerationExecutionContext, GenerationExecutionResult } from "@/types/generationQueue";
+import { createAcceptanceGenerationRegistry, type AcceptanceGenerationOptions } from "@/jobs/acceptanceRegistry";
 
 type CoreExecutor<TPayload> = (
   payload: TPayload,
@@ -27,3 +28,9 @@ export function createCoreGenerationRegistry(overrides: Partial<CoreGenerationEx
 }
 
 export const coreGenerationRegistry = createCoreGenerationRegistry();
+
+export function selectGenerationRegistry(
+  options: AcceptanceGenerationOptions & { acceptanceMode: boolean },
+) {
+  return options.acceptanceMode ? createAcceptanceGenerationRegistry(options) : coreGenerationRegistry;
+}

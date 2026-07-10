@@ -215,13 +215,18 @@ function testTextGenerationPayloadContract(): void {
   }
 
   for (const operation of ["script_agent", "production_agent"] as const) {
-    assert.equal(textGenerationPayloadSchema.parse({
+    const payload = {
       operation,
       projectId: 1001,
       targetId: 1,
       model: "universalAi",
-      prompt: "",
-    }).operation, operation);
+      prompt: "继续处理当前任务",
+      isolationKey: `1001:${operation}`,
+      thinkLevel: 1,
+      ...(operation === "production_agent" ? { scriptId: 1 } : {}),
+    };
+    assert.equal(textGenerationPayloadSchema.parse(payload).operation, operation);
+    assert.throws(() => textGenerationPayloadSchema.parse({ ...payload, socket: {} }));
   }
 
   const productionTextPayloads = [

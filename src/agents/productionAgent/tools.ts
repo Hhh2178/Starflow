@@ -129,30 +129,9 @@ export default (toolCpnfig: ToolConfig) => {
         const deriveAsset = { ...raw, id: normalizedId };
 
         const thinking = msg.thinking("正在操作资产...");
-        const { projectId, scriptId } = resTool.data;
-        const startTime = Date.now();
-        const parentAssets = await u.db("o_assets").where("id", deriveAsset.assetsId).select("id", "type").first();
-        if (!parentAssets) return "关联的资产不存在";
-
-        const data = {
-          id: deriveAsset.id ?? undefined,
-          assetsId: deriveAsset.assetsId,
-          projectId,
-          name: deriveAsset.name,
-          type: parentAssets.type,
-          describe: deriveAsset.desc,
-          startTime,
-        };
-        if (deriveAsset.id) {
-          await u.db("o_assets").where("id", deriveAsset.id).update(data);
-          thinking.appendText(`已更新衍生资产，ID: ${deriveAsset.id}\n`);
-        } else {
-          const [insertedId] = await u.db("o_assets").insert(data);
-          data.id = insertedId;
-          await u.db("o_scriptAssets").insert({ scriptId, assetId: insertedId });
-          thinking.appendText(`已新增衍生资产，ID: ${insertedId}\n`);
-        }
-        const res = await new Promise((resolve) => socket.emit("addDeriveAsset", data, (res: any) => resolve(res)));
+        const res: any = await new Promise((resolve) => socket.emit("addDeriveAsset", deriveAsset, (value: any) => resolve(value)));
+        if (res?.error) throw new Error(res.error);
+        thinking.appendText(`已保存衍生资产，ID: ${res.id}\n`);
         thinking.updateTitle("资产操作完成");
         thinking.complete();
         return res ?? "操作成功";
@@ -170,11 +149,9 @@ export default (toolCpnfig: ToolConfig) => {
       ),
       execute: async ({ assetsId, id }) => {
         const thinking = msg.thinking("正在操作资产...");
-        const { scriptId } = resTool.data;
-        await u.db("o_assets").where("id", id).del();
-        await u.db("o_scriptAssets").where({ scriptId, assetId: id }).del();
-        thinking.appendText(`已删除衍生资产，ID: ${id}\n`);
-        const res = await new Promise((resolve) => socket.emit("delDeriveAsset", { assetsId, id }, (res: any) => resolve(res)));
+        const res: any = await new Promise((resolve) => socket.emit("delDeriveAsset", { assetsId, id }, (value: any) => resolve(value)));
+        if (res?.error) throw new Error(res.error);
+        thinking.appendText(`已删除衍生资产，ID: ${res.id}\n`);
         thinking.updateTitle("资产操作完成");
         thinking.complete();
         return res ?? "删除成功";
@@ -191,19 +168,12 @@ export default (toolCpnfig: ToolConfig) => {
       ),
       execute: async ({ ids }) => {
         const thinking = msg.thinking("正在生成衍生资产...");
-        new Promise((resolve) => socket.emit("generateDeriveAsset", { ids }, (res: any) => resolve(res)))
-          .then((res) => {
-            thinking.appendText(`已生成衍生资产，ID: ${JSON.stringify(res, null, 2)}\n`);
-            thinking.updateTitle("衍生资产开始完成");
-            thinking.complete();
-          })
-          .catch((e) => {
-            thinking.appendText("衍生资产生成失败:\n" + u.error(e).message);
-            thinking.updateTitle("衍生资产生成失败");
-            thinking.complete();
-          });
-
-        return "开始生成衍生资产";
+        const res: any = await new Promise((resolve) => socket.emit("generateDeriveAsset", { ids }, (value: any) => resolve(value)));
+        if (res?.error) throw new Error(res.error);
+        thinking.appendText(`衍生资产任务已入队: ${JSON.stringify(res, null, 2)}\n`);
+        thinking.updateTitle("衍生资产任务已入队");
+        thinking.complete();
+        return res;
       },
     }),
     generate_storyboard: tool({
@@ -217,27 +187,13 @@ export default (toolCpnfig: ToolConfig) => {
       ),
       execute: async ({ ids }) => {
         const thinking = msg.thinking("正在生成分镜...");
-        socketQueue(
-          () =>
-            new Promise((resolve, reject) =>
-              socket.emit("generateStoryboard", { ids }, (res: any) => {
-                if (res?.error) return reject(new Error(res.error));
-                resolve(res);
-              }),
-            ),
-        )
-          .then((res) => {
-            thinking.appendText("生成的分镜数据:\n" + JSON.stringify(res, null, 2));
-            thinking.updateTitle("分镜生成完成");
-            thinking.complete();
-          })
-          .catch((e) => {
-            thinking.appendText("分镜生成失败:\n" + u.error(e).message);
-            thinking.updateTitle("分镜生成失败");
-            thinking.complete();
-          });
-
-        return "开始生成分镜";
+        const res = await socketQueue(
+          () => new Promise((resolve, reject) => socket.emit("generateStoryboard", { ids }, (value: any) => value?.error ? reject(new Error(value.error)) : resolve(value))),
+        );
+        thinking.appendText("分镜任务已入队:\n" + JSON.stringify(res, null, 2));
+        thinking.updateTitle("分镜任务已入队");
+        thinking.complete();
+        return res;
       },
     }),
     add_flowData_storyboard: tool({
@@ -271,26 +227,13 @@ export default (toolCpnfig: ToolConfig) => {
           associateAssetsIds: raw.associateAssetsIds ?? [],
           shouldGenerateImage: raw.shouldGenerateImage,
         };
-        socketQueue(
-          () =>
-            new Promise((resolve, reject) =>
-              socket.emit("addStoryboard", { ...data }, (res: any) => {
-                if (res?.error) return reject(new Error(res.error));
-                resolve(res);
-              }),
-            ),
-        )
-          .then((res) => {
-            thinking.appendText("新增的分镜数据:\n" + JSON.stringify(data, null, 2));
-            thinking.updateTitle("新增分镜成功");
-            thinking.complete();
-          })
-          .catch((e) => {
-            thinking.appendText("新增的分镜数据:\n" + JSON.stringify(data, null, 2));
-            thinking.updateTitle("新增分镜失败");
-            thinking.complete();
-          });
-        return true;
+        const res = await socketQueue(
+          () => new Promise((resolve, reject) => socket.emit("addStoryboard", data, (value: any) => value?.error ? reject(new Error(value.error)) : resolve(value))),
+        );
+        thinking.appendText("新增的分镜数据:\n" + JSON.stringify({ ...data, result: res }, null, 2));
+        thinking.updateTitle("新增分镜成功");
+        thinking.complete();
+        return res;
       },
     }),
   };

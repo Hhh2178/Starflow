@@ -1,4 +1,4 @@
-// @db-hash 5cba15b9abf1c485cd89424b23e1171d
+// @db-hash b2da9160a643dd98c50b7f4dd2ddd8c7
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -25,6 +25,14 @@ export interface o_agentDeploy {
   'temperature'?: number | null;
   'type'?: string | null;
   'vendorId'?: string | null;
+}
+export interface o_agentJobEvent {
+  'createdAt': number;
+  'dataJson': string;
+  'event': string;
+  'id'?: number;
+  'jobId': number;
+  'sequence': number;
 }
 export interface o_agentWorkData {
   'createTime'?: number | null;
@@ -337,6 +345,7 @@ export interface o_videoTrack {
 export interface DB {
   "memories": memories;
   "o_agentDeploy": o_agentDeploy;
+  "o_agentJobEvent": o_agentJobEvent;
   "o_agentWorkData": o_agentWorkData;
   "o_artStyle": o_artStyle;
   "o_assets": o_assets;

@@ -127,6 +127,18 @@ export default async (
       },
     },
     {
+      name: "o_agentJobEvent",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("jobId").notNullable().index();
+        table.integer("sequence").notNullable();
+        table.text("event").notNullable();
+        table.text("dataJson").notNullable();
+        table.integer("createdAt").notNullable();
+        table.unique(["jobId", "sequence"]);
+      },
+    },
+    {
       name: "o_usageLedger",
       builder: (table) => {
         table.increments("id").primary();

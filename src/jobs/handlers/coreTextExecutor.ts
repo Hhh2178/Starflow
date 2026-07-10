@@ -7,6 +7,7 @@ import type { GenerationExecutionContext, GenerationExecutionResult } from "@/ty
 import type { TextGenerationPayload } from "@/jobs/handlers/textGeneration";
 import { jsonSchema, tool } from "ai";
 import { z } from "zod";
+import { executeQueuedAgent } from "@/services/agentQueue";
 
 type ExecutorConnection = Knex | Knex.Transaction;
 
@@ -454,5 +455,8 @@ export async function executeCoreTextGeneration(
   if (payload.operation === "asset_audio") return executeAssetAudio(payload, context, dependencies);
   if (payload.operation === "script_assets") return executeScriptAssets(payload, context, dependencies);
   if (payload.operation === "ai_regex") return executeAiRegex(payload, context, dependencies);
-  throw new Error(`尚未接入的文本任务类型: ${payload.operation}`);
+  if (payload.operation === "script_agent" || payload.operation === "production_agent") {
+    return executeQueuedAgent(payload, context);
+  }
+  throw new Error("尚未接入的文本任务类型");
 }

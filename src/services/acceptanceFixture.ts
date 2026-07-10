@@ -23,6 +23,15 @@ export async function seedAcceptanceFixture(
   const passwordHash = hashPassword(password);
 
   return connection.transaction(async (trx) => {
+    const acceptanceModels = [
+      { name: "本地验收图片", modelName: "acceptance-image", type: "image", mode: ["text", "singleImage", "multiReference"] },
+      { name: "本地验收视频", modelName: "acceptance-video", type: "video", mode: ["text", "singleImage"], audio: false, durationResolutionMap: [{ duration: [5], resolution: ["720p"] }] },
+    ];
+    await trx("o_vendorConfig")
+      .insert({ id: "null", inputValues: "{}", models: JSON.stringify(acceptanceModels), enable: 1 })
+      .onConflict("id")
+      .merge({ inputValues: "{}", models: JSON.stringify(acceptanceModels), enable: 1 });
+
     const ensureUser = async (name: string, role: "admin" | "creator", groupId: number | null) => {
       let user = await trx("o_user").where({ name }).first();
       if (!user) {
@@ -77,7 +86,7 @@ export async function seedAcceptanceFixture(
 
     const ensureProject = async (name: string, ownerUserId: number, groupId: number) => {
       let project = await trx("o_project").where({ name }).first();
-      const values = { projectType: "series", imageModel: "acceptance-image", imageQuality: "standard", videoModel: "acceptance-video", name, intro: "本地浏览器验收项目", type: "漫剧", artStyle: "验收风格", mode: "standard", videoRatio: "16:9", createTime: now, userId: ownerUserId, ownerUserId, groupId };
+      const values = { projectType: "novel", imageModel: "null:acceptance-image", imageQuality: "1K", videoModel: "null:acceptance-video", name, intro: "本地浏览器验收项目", type: "漫剧", artStyle: "验收风格", mode: "text", videoRatio: "16:9", createTime: now, userId: ownerUserId, ownerUserId, groupId };
       if (!project) {
         const id = await nextId(trx, "o_project");
         await trx("o_project").insert({ id, ...values });
@@ -87,6 +96,56 @@ export async function seedAcceptanceFixture(
     };
     const projectAId = await ensureProject("验收一组项目", creatorA1.id, groupA.id);
     const projectBId = await ensureProject("验收二组项目", creatorB1.id, groupB.id);
+
+    const ensureProductionContent = async (label: string, projectId: number) => {
+      let novel = await trx("o_novel").where({ projectId, chapter: `${label}原文` }).first();
+      if (!novel) {
+        const id = await nextId(trx, "o_novel");
+        await trx("o_novel").insert({ id, chapterIndex: 1, reel: "第一卷", chapter: `${label}原文`, chapterData: "测试角色走入测试场景。", projectId, eventState: 1, event: "验收事件", errorReason: null, createTime: now });
+        novel = { id };
+      }
+
+      let script = await trx("o_script").where({ projectId, name: `${label}剧本` }).first();
+      if (!script) {
+        const id = await nextId(trx, "o_script");
+        await trx("o_script").insert({ id, name: `${label}剧本`, content: "第一场：测试角色走入测试场景。", projectId, extractState: 1, createTime: now, errorReason: null });
+        script = { id };
+      }
+
+      let asset = await trx("o_assets").where({ projectId, name: `${label}角色` }).first();
+      if (!asset) {
+        const imageId = await nextId(trx, "o_image");
+        await trx("o_image").insert({ id: imageId, filePath: null, type: "role", assetsId: null, model: "null:acceptance-image", resolution: "1K", state: "", errorReason: null });
+        const id = await nextId(trx, "o_assets");
+        await trx("o_assets").insert({ id, name: `${label}角色`, prompt: "电影感角色立绘，正面站立", remark: "", type: "role", describe: "用于浏览器图片生成验收", scriptId: script.id, imageId, assetsId: null, projectId, startTime: now, promptState: "已完成", audioBindState: null });
+        await trx("o_image").where({ id: imageId }).update({ assetsId: id });
+        asset = { id, imageId };
+      }
+      if (!(await trx("o_scriptAssets").where({ scriptId: script.id, assetId: asset.id }).first())) {
+        await trx("o_scriptAssets").insert({ scriptId: script.id, assetId: asset.id });
+      }
+
+      let track = await trx("o_videoTrack").where({ projectId, scriptId: script.id, prompt: `${label}视频提示词` }).first();
+      if (!track) {
+        const id = await nextId(trx, "o_videoTrack");
+        await trx("o_videoTrack").insert({ id, videoId: null, projectId, scriptId: script.id, state: "已完成", reason: null, prompt: `${label}视频提示词`, selectVideoId: null, duration: 5 });
+        track = { id };
+      }
+
+      let storyboard = await trx("o_storyboard").where({ projectId, scriptId: script.id, prompt: `${label}分镜提示词` }).first();
+      if (!storyboard) {
+        const id = await nextId(trx, "o_storyboard");
+        await trx("o_storyboard").insert({ id, scriptId: script.id, prompt: `${label}分镜提示词`, filePath: null, duration: "5", state: "未生成", trackId: track.id, reason: null, track: "main", videoDesc: "角色缓慢走入画面", shouldGenerateImage: 0, projectId, flowId: null, index: 1, createTime: now });
+        storyboard = { id };
+      }
+
+      const flowData = JSON.stringify({ scriptPlan: "", storyboardTable: "", workbench: { videoList: [] } });
+      const work = await trx("o_agentWorkData").where({ projectId, episodesId: script.id, key: "acceptance-production" }).first();
+      if (work) await trx("o_agentWorkData").where({ id: work.id }).update({ data: flowData, updateTime: now });
+      else await trx("o_agentWorkData").insert({ id: await nextId(trx, "o_agentWorkData"), projectId, episodesId: script.id, key: "acceptance-production", data: flowData, createTime: now, updateTime: now });
+    };
+    await ensureProductionContent("验收一组", projectAId);
+    await ensureProductionContent("验收二组", projectBId);
 
     const ensureTask = async (marker: string, values: Record<string, unknown>) => {
       let task = await trx("o_tasks").where({ relatedObjects: marker }).first();

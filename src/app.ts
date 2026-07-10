@@ -17,7 +17,7 @@ import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
 import { requireAuth, requireRole } from "@/middleware/auth";
 import { requireScopedProductionAccess } from "@/middleware/projectAccess";
 import { db, dbReady } from "@/utils/db";
-import { coreGenerationRegistry } from "@/jobs/coreRegistry";
+import { selectGenerationRegistry } from "@/jobs/coreRegistry";
 import { startGenerationScheduler } from "@/services/generationSchedulerRuntime";
 
 const app = express();
@@ -151,6 +151,15 @@ export default async function startServe(randomPort: Boolean = false) {
   if (fs.existsSync(webDir)) {
     console.log("静态网站目录:", webDir);
     app.use(express.static(webDir, { acceptRanges: false }));
+    const adminIndex = path.join(webDir, "admin", "index.html");
+    if (fs.existsSync(adminIndex)) {
+      app.get(/^\/admin(?:\/.*)?$/, (_, res, next) => {
+        res.type("html");
+        const stream = fs.createReadStream(adminIndex);
+        stream.on("error", next);
+        stream.pipe(res);
+      });
+    }
   } else {
     console.warn("静态网站目录不存在:", webDir);
   }
@@ -187,7 +196,13 @@ export default async function startServe(randomPort: Boolean = false) {
 
   const router = await import("@/router");
   await router.default(app);
-  stopScheduler = await startGenerationScheduler({ connection: db, registry: coreGenerationRegistry });
+  const configuredAcceptanceDelay = Number(process.env.STARS_ACCEPTANCE_DELAY_MS);
+  const generationRegistry = selectGenerationRegistry({
+    connection: db,
+    acceptanceMode: process.env.STARS_ACCEPTANCE_MODE === "1",
+    delayMs: Number.isFinite(configuredAcceptanceDelay) ? configuredAcceptanceDelay : undefined,
+  });
+  stopScheduler = await startGenerationScheduler({ connection: db, registry: generationRegistry });
 
   // 404 处理
   app.use((_, res, next: NextFunction) => {

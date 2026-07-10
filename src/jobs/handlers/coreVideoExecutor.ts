@@ -40,7 +40,7 @@ export async function executeCoreVideoGeneration(
       audio: payload.audio,
     });
     await aiVideo.save(String(video.filePath));
-    await u.db("o_video").where({ id: payload.targetId }).update({ state: "生成成功", errorReason: null });
+    await u.db("o_video").where({ id: payload.targetId }).update({ state: "已完成", errorReason: null });
     return {
       result: { videoId: payload.targetId, path: video.filePath },
       metering: {

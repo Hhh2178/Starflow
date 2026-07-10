@@ -33,12 +33,23 @@ const videoPromptPayloadSchema = z.object({
 
 const scriptAgentPayloadSchema = z.object({
   operation: z.literal("script_agent"),
-  ...commonTextPayloadShape,
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  prompt: z.string().min(1),
+  isolationKey: z.string().min(1),
+  thinkLevel: z.number().int().min(0).max(3),
 }).strict();
 
 const productionAgentPayloadSchema = z.object({
   operation: z.literal("production_agent"),
-  ...commonTextPayloadShape,
+  projectId: z.number().int().positive(),
+  targetId: z.number().int().positive(),
+  scriptId: z.number().int().positive(),
+  model: z.literal("universalAi"),
+  prompt: z.string().min(1),
+  isolationKey: z.string().min(1),
+  thinkLevel: z.number().int().min(0).max(3),
 }).strict();
 
 const stylePromptPayloadSchema = z.object({

@@ -200,6 +200,15 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
     table.integer("finishedAt");
   });
   await ensureGenerationQueueOrderingIndex(knex);
+  await ensureTable(knex, "o_agentJobEvent", (table) => {
+    table.increments("id").primary();
+    table.integer("jobId").notNullable().index();
+    table.integer("sequence").notNullable();
+    table.text("event").notNullable();
+    table.text("dataJson").notNullable();
+    table.integer("createdAt").notNullable();
+    table.unique(["jobId", "sequence"]);
+  });
   await ensureTable(knex, "o_usageLedger", (table) => {
     table.increments("id").primary();
     table.integer("jobId").notNullable().unique();

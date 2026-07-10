@@ -1,5 +1,4 @@
-import { db, dbReady } from "../src/utils/db";
-import { seedAcceptanceFixture } from "../src/services/acceptanceFixture";
+export {};
 
 async function main() {
   if (process.env.NODE_ENV !== "dev" && process.env.STARS_ALLOW_ACCEPTANCE_FIXTURE !== "1") {
@@ -7,6 +6,11 @@ async function main() {
   }
   const password = process.env.STARS_ACCEPTANCE_PASSWORD ?? "";
   if (!password) throw new Error("请通过 STARS_ACCEPTANCE_PASSWORD 提供本地验收账号密码");
+  process.env.STARS_ACCEPTANCE_MODE = "1";
+  const [{ db, dbReady }, { seedAcceptanceFixture }] = await Promise.all([
+    import("../src/utils/db"),
+    import("../src/services/acceptanceFixture"),
+  ]);
   await dbReady;
   const result = await seedAcceptanceFixture(db, password);
   console.log(JSON.stringify({
@@ -19,6 +23,6 @@ async function main() {
 }
 
 main().then(
-  async () => { await db.destroy(); process.exit(0); },
-  async (error) => { console.error(error instanceof Error ? error.message : "验收 fixture 执行失败"); await db.destroy(); process.exit(1); },
+  () => process.exit(0),
+  (error) => { console.error(error instanceof Error ? error.message : "验收 fixture 执行失败"); process.exit(1); },
 );

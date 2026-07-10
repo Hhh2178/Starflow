@@ -14,7 +14,7 @@ import u from "@/utils";
 import socketInit from "@/socket/index";
 import { isEletron } from "@/utils/getPath";
 import { ensureThumbnail, ThumbnailSize } from "@/utils/image";
-import { requireAuth } from "@/middleware/auth";
+import { requireAuth, requireRole } from "@/middleware/auth";
 
 const app = express();
 const server = http.createServer(app);
@@ -150,6 +150,30 @@ export default async function startServe(randomPort: Boolean = false) {
   }
 
   app.use(requireAuth);
+
+  const superAdminSettingPaths = [
+    "/api/setting/vendorConfig",
+    "/api/setting/modelMap",
+    "/api/setting/agentDeploy",
+    "/api/setting/dbConfig",
+    "/api/setting/dev",
+    "/api/setting/fileManagement",
+  ];
+  for (const routePath of superAdminSettingPaths) {
+    app.use(routePath, requireRole("super_admin"));
+  }
+
+  const productionAdminSettingPaths = [
+    "/api/setting/promptManage",
+    "/api/setting/skillManagement",
+    "/api/setting/memoryConfig",
+  ];
+  for (const routePath of productionAdminSettingPaths) {
+    app.use(routePath, requireRole("super_admin", "admin"));
+  }
+
+  app.use("/api/setting/userManagement", requireRole("super_admin", "admin"));
+  app.use("/api/other/deleteAllData", requireRole("super_admin"));
 
   const router = await import("@/router");
   await router.default(app);

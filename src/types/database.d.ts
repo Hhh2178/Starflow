@@ -1,4 +1,4 @@
-// @db-hash 07b9a6531f412999fed73d020c66210f
+// @db-hash f2231718357103a42a3ca1b5ddf42f3c
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -203,8 +203,8 @@ export interface o_user {
   'name'?: string | null;
   'password'?: string | null;
   'passwordHash'?: string | null;
-  'role'?: string | null;
-  'status'?: string | null;
+  'role'?: string;
+  'status'?: string;
   'updatedAt'?: number | null;
 }
 export interface o_vendorConfig {

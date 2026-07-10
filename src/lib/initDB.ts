@@ -34,7 +34,7 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
           {
             id: 1,
             name: "admin",
-            password: "admin123",
+            password: null,
             passwordHash: hashPassword("admin123"),
             role: "super_admin",
             status: "enabled",

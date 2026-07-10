@@ -24,6 +24,7 @@
     "dev:gui-vite": "cross-env VITE_DEV=1 electronmon -r tsx scripts/main.ts",
     "start": "cross-env NODE_ENV=prod node data/serve/app.js",
     "lint": "tsc --noEmit",
+    "test:r2": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r2-setting-permissions.test.ts",
     "build": "cross-env NODE_ENV=prod tsx scripts/build.ts",
     "pack": "electron-builder --dir",
     "dist": "yarn build && electron-builder",

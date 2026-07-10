@@ -1,4 +1,4 @@
-import { RequestHandler } from "express";
+import { Request, RequestHandler } from "express";
 import jwt from "jsonwebtoken";
 import u from "@/utils";
 import { AuthUser, UserRole, normalizeRole } from "@/types/auth";
@@ -15,6 +15,10 @@ export function hasRole(user: AuthUser | undefined, roles: UserRole[]): boolean 
   return roles.includes(user.role);
 }
 
+export function getAuthUser(req: Request): AuthUser {
+  return (req as Request & { user: AuthUser }).user;
+}
+
 export const requireAuth: RequestHandler = async (req, res, next) => {
   if (PUBLIC_API_PATHS.has(req.path)) return next();
 
@@ -27,12 +31,16 @@ export const requireAuth: RequestHandler = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, tokenKey) as Partial<AuthUser>;
-    if (!decoded.id || !decoded.name) return res.status(401).send({ message: "无效的token" });
+    if (!decoded.id) return res.status(401).send({ message: "无效的token" });
+
+    const userRecord = await u.db("o_user").where("id", Number(decoded.id)).select("id", "name", "role", "status").first();
+    if (!userRecord) return res.status(401).send({ message: "账号不存在" });
+    if (userRecord.status === "disabled") return res.status(403).send({ message: "账号已停用，请联系管理员" });
 
     (req as any).user = {
-      id: Number(decoded.id),
-      name: String(decoded.name),
-      role: normalizeRole(decoded.role, Number(decoded.id) === 1 ? "super_admin" : "creator"),
+      id: Number(userRecord.id),
+      name: String(userRecord.name),
+      role: normalizeRole(userRecord.role, Number(userRecord.id) === 1 ? "super_admin" : "creator"),
     } satisfies AuthUser;
     next();
   } catch {

@@ -1,7 +1,17 @@
 import type { Knex } from "knex";
 import type { AuthUser } from "@/types/auth";
+import { writeAudit } from "@/services/auditLog";
 
 type QuotaConnection = Knex | Knex.Transaction;
+
+export type QuotaAdjustmentEntryType = "manual_topup" | "manual_credit" | "manual_debit";
+
+export interface QuotaAdjustmentInput {
+  groupId: number;
+  entryType: QuotaAdjustmentEntryType;
+  amount: number;
+  reason: string;
+}
 
 export class QuotaManagementError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
@@ -14,26 +24,87 @@ async function resolveConnection(connection?: QuotaConnection): Promise<QuotaCon
   return (await import("@/utils/db")).db;
 }
 
-export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnection) {
-  if (actor.role !== "super_admin") {
-    throw new QuotaManagementError(403, "SUPER_ADMIN_REQUIRED", "仅超级管理员可以查看全局额度");
+async function inTransaction<T>(
+  connection: QuotaConnection,
+  run: (trx: Knex.Transaction) => Promise<T>,
+): Promise<T> {
+  if ((connection as Knex.Transaction).isTransaction) return run(connection as Knex.Transaction);
+  return (connection as Knex).transaction(run);
+}
+
+function assertAdminScope(actor: AuthUser): void {
+  if (actor.role === "creator") {
+    throw new QuotaManagementError(403, "ADMIN_REQUIRED", "仅管理员可以查看额度");
   }
+  if (actor.role === "admin" && actor.groupId == null) {
+    throw new QuotaManagementError(403, "ADMIN_GROUP_REQUIRED", "管理员尚未归属分组");
+  }
+}
+
+function toLedgerDto(ledger: any, redactActor: boolean = false) {
+  return {
+    id: Number(ledger.id),
+    groupId: Number(ledger.groupId),
+    entryType: String(ledger.entryType),
+    amount: Number(ledger.amount),
+    balanceBefore: Number(ledger.balanceBefore),
+    balanceAfter: Number(ledger.balanceAfter),
+    actorUserId: redactActor || ledger.actorUserId == null ? null : Number(ledger.actorUserId),
+    usageLedgerId: ledger.usageLedgerId == null ? null : Number(ledger.usageLedgerId),
+    reason: String(ledger.reason),
+    createdAt: Number(ledger.createdAt),
+  };
+}
+
+export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnection) {
+  assertAdminScope(actor);
   const resolvedConnection = await resolveConnection(connection);
-  const [groups, ledgers] = await Promise.all([
-    resolvedConnection("o_group")
-      .leftJoin("o_quotaAccount", "o_quotaAccount.groupId", "o_group.id")
-      .select("o_group.id", "o_group.name", "o_quotaAccount.balance")
-      .orderBy("o_group.id", "asc"),
-    resolvedConnection("o_quotaLedger").select("*").orderBy("createdAt", "desc").orderBy("id", "desc").limit(200),
-  ]);
+  let groupsQuery = resolvedConnection("o_group")
+    .leftJoin("o_quotaAccount", "o_quotaAccount.groupId", "o_group.id")
+    .select("o_group.id", "o_group.name", "o_quotaAccount.balance")
+    .orderBy("o_group.id", "asc");
+  let totalsQuery = resolvedConnection("o_quotaLedger")
+    .select("groupId")
+    .sum({
+      totalRecharge: resolvedConnection.raw(
+        "CASE WHEN entryType = 'manual_topup' AND amount > 0 THEN amount ELSE 0 END",
+      ),
+      totalUsage: resolvedConnection.raw(
+        "CASE WHEN entryType = 'usage_debit' THEN ABS(amount) ELSE 0 END",
+      ),
+    })
+    .groupBy("groupId");
+  let logsQuery = resolvedConnection("o_quotaLedger")
+    .leftJoin("o_user as actor", "actor.id", "o_quotaLedger.actorUserId")
+    .select(
+      "o_quotaLedger.id",
+      "o_quotaLedger.groupId",
+      "o_quotaLedger.entryType",
+      "o_quotaLedger.amount",
+      "o_quotaLedger.balanceBefore",
+      "o_quotaLedger.balanceAfter",
+      "o_quotaLedger.actorUserId",
+      "o_quotaLedger.usageLedgerId",
+      "o_quotaLedger.reason",
+      "o_quotaLedger.createdAt",
+      "actor.role as actorRole",
+    )
+    .orderBy("o_quotaLedger.createdAt", "desc")
+    .orderBy("o_quotaLedger.id", "desc")
+    .limit(200);
+  if (actor.role === "admin") {
+    groupsQuery = groupsQuery.where("o_group.id", actor.groupId);
+    totalsQuery = totalsQuery.where("o_quotaLedger.groupId", actor.groupId);
+    logsQuery = logsQuery.where("o_quotaLedger.groupId", actor.groupId);
+  }
+
+  const [groups, totalRows, ledgers] = await Promise.all([groupsQuery, totalsQuery, logsQuery]);
   const totals = new Map<number, { recharge: number; usage: number }>();
-  for (const ledger of ledgers) {
-    const groupId = Number(ledger.groupId);
-    const total = totals.get(groupId) ?? { recharge: 0, usage: 0 };
-    const amount = Number(ledger.amount);
-    if ((ledger.entryType === "recharge" || ledger.entryType === "manual_credit") && amount > 0) total.recharge += amount;
-    if (ledger.entryType === "usage_debit" && amount < 0) total.usage += Math.abs(amount);
-    totals.set(groupId, total);
+  for (const row of totalRows as any[]) {
+    totals.set(Number(row.groupId), {
+      recharge: Number(row.totalRecharge ?? 0),
+      usage: Number(row.totalUsage ?? 0),
+    });
   }
   return {
     groups: groups.map((group: any) => ({
@@ -43,17 +114,86 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
       totalRecharge: totals.get(Number(group.id))?.recharge ?? 0,
       totalUsage: totals.get(Number(group.id))?.usage ?? 0,
     })),
-    logs: ledgers.map((ledger: any) => ({
-      id: Number(ledger.id),
-      groupId: Number(ledger.groupId),
-      entryType: String(ledger.entryType),
-      amount: Number(ledger.amount),
-      balanceBefore: Number(ledger.balanceBefore),
-      balanceAfter: Number(ledger.balanceAfter),
-      actorUserId: ledger.actorUserId == null ? null : Number(ledger.actorUserId),
-      usageLedgerId: ledger.usageLedgerId == null ? null : Number(ledger.usageLedgerId),
-      reason: String(ledger.reason),
-      createdAt: Number(ledger.createdAt),
-    })),
+    logs: ledgers.map((ledger: any) => toLedgerDto(
+      ledger,
+      actor.role === "admin" && ledger.actorRole === "super_admin",
+    )),
   };
+}
+
+export async function adjustQuota(
+  actor: AuthUser,
+  input: QuotaAdjustmentInput,
+  connection?: QuotaConnection,
+) {
+  if (actor.role !== "super_admin") {
+    throw new QuotaManagementError(403, "SUPER_ADMIN_REQUIRED", "仅超级管理员可以调整额度");
+  }
+  if (!Number.isInteger(input.groupId) || input.groupId <= 0) {
+    throw new QuotaManagementError(422, "GROUP_ID_INVALID", "分组 ID 必须是正整数");
+  }
+  if (!["manual_topup", "manual_credit", "manual_debit"].includes(input.entryType)) {
+    throw new QuotaManagementError(422, "ENTRY_TYPE_INVALID", "额度调整类型无效");
+  }
+  if (!Number.isFinite(input.amount) || input.amount <= 0) {
+    throw new QuotaManagementError(422, "AMOUNT_INVALID", "调整金额必须大于零");
+  }
+  const reason = input.reason.trim();
+  if (reason.length < 2 || reason.length > 500) {
+    throw new QuotaManagementError(422, "REASON_INVALID", "调整原因长度必须为 2 到 500 个字符");
+  }
+
+  const resolvedConnection = await resolveConnection(connection);
+  return inTransaction(resolvedConnection, async (trx) => {
+    const group = await trx("o_group").where({ id: input.groupId }).first();
+    if (!group) throw new QuotaManagementError(404, "GROUP_NOT_FOUND", "分组不存在");
+    const account = await trx("o_quotaAccount").where({ groupId: input.groupId }).first();
+    if (!account) throw new QuotaManagementError(404, "QUOTA_ACCOUNT_NOT_FOUND", "额度账户不存在");
+
+    const balanceBefore = Number(account.balance);
+    const signedAmount = input.entryType === "manual_debit" ? -input.amount : input.amount;
+    const balanceAfter = balanceBefore + signedAmount;
+    const createdAt = Date.now();
+    const [ledgerId] = await trx("o_quotaLedger").insert({
+      groupId: input.groupId,
+      entryType: input.entryType,
+      amount: signedAmount,
+      balanceBefore,
+      balanceAfter,
+      actorUserId: actor.id,
+      usageLedgerId: null,
+      reason,
+      createdAt,
+    });
+    await trx("o_quotaAccount")
+      .where({ groupId: input.groupId })
+      .update({ balance: balanceAfter, updatedAt: createdAt });
+    await writeAudit({
+      actor,
+      groupId: input.groupId,
+      action: "quota.adjust",
+      targetType: "quota_account",
+      targetId: input.groupId,
+      summary: {
+        groupId: input.groupId,
+        entryType: input.entryType,
+        amount: signedAmount,
+        balanceBefore,
+        balanceAfter,
+        reason,
+      },
+      result: "success",
+    }, trx);
+
+    const updatedAccount = await trx("o_quotaAccount").where({ groupId: input.groupId }).first();
+    const ledger = await trx("o_quotaLedger").where({ id: ledgerId }).first();
+    return {
+      account: {
+        groupId: Number(updatedAccount.groupId),
+        balance: Number(updatedAccount.balance),
+        updatedAt: Number(updatedAccount.updatedAt),
+      },
+      ledger: toLedgerDto(ledger),
+    };
+  });
 }

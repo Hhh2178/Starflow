@@ -38,7 +38,7 @@ import {
   enqueueVideoPromptJobs,
 } from "@/services/generationWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
-import { getQuotaOverview, QuotaManagementError } from "@/services/quotaManagement";
+import { getQuotaOverview } from "@/services/quotaManagement";
 import { createGetJobRouter } from "@/routes/generation/getJob";
 import {
   createGenerateVideoPromptHandler,
@@ -1705,10 +1705,12 @@ async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(groupQuota.totalRecharge, 0);
   assert.equal(groupQuota.totalUsage, 12.5);
   assert.equal(quotaOverview.logs.some((log) => log.usageLedgerId === knownUsage.id), true);
-  await assert.rejects(
-    getQuotaOverview({ id: 2, name: "admin-a", role: "admin", groupId: 101 }, db),
-    (error: unknown) => error instanceof QuotaManagementError && error.status === 403,
+  const adminQuotaOverview = await getQuotaOverview(
+    { id: 2, name: "admin-a", role: "admin", groupId: 101 },
+    db,
   );
+  assert.deepEqual(adminQuotaOverview.groups.map((group) => group.groupId), [101]);
+  assert.equal(adminQuotaOverview.logs.every((log) => log.groupId === 101), true);
 }
 
 async function main(): Promise<void> {

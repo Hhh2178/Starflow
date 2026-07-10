@@ -1,6 +1,5 @@
 import { Knex } from "knex";
 import { v4 as uuid } from "uuid";
-import { getEmbedding } from "@/utils/agent/embedding";
 import { hashPassword } from "@/utils/password";
 
 interface TableSchema {
@@ -9,7 +8,11 @@ interface TableSchema {
   initData?: (knex: Knex) => Promise<void>;
 }
 
-export default async (knex: Knex, forceInit: boolean = false): Promise<void> => {
+export default async (
+  knex: Knex,
+  forceInit: boolean = false,
+  initializeData: boolean = true,
+): Promise<void> => {
   const tables: TableSchema[] = [
     // 用户表
     {
@@ -983,6 +986,7 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
             state: 1,
           },
         ];
+        const { getEmbedding } = await import("@/utils/agent/embedding");
         await Promise.all(
           list.map(async (item) => {
             const embedding = await getEmbedding(item.description);
@@ -1101,7 +1105,7 @@ export default async (knex: Knex, forceInit: boolean = false): Promise<void> => 
         console.log("[初始化数据库] 创建数据表:", t.name);
       }
       await knex.schema.createTable(t.name, t.builder);
-      if (t.initData) {
+      if (initializeData && t.initData) {
         await t.initData(knex);
         console.log("[初始化数据库] 表数据初始化:", t.name);
       }

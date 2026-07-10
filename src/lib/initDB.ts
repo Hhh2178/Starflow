@@ -1,6 +1,7 @@
 import { Knex } from "knex";
 import { v4 as uuid } from "uuid";
 import { hashPassword } from "@/utils/password";
+import { addGenerationQueueOrderingIndex } from "@/lib/generationQueueSchema";
 
 interface TableSchema {
   name: string;
@@ -121,6 +122,7 @@ export default async (
         table.integer("queuedAt").notNullable();
         table.integer("startedAt");
         table.integer("finishedAt");
+        addGenerationQueueOrderingIndex(table, knex);
       },
     },
     {

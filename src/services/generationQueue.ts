@@ -53,6 +53,7 @@ export interface GenerationJobDetail {
   taskType: GenerationTaskType;
   status: GenerationJobStatus;
   priority: number;
+  /** 当前组内排序得到的预计位置；公平调度与容量变化可能使实际执行顺序动态变化。 */
   queuePosition: number | null;
   queuedAt: number;
   startedAt: number | null;

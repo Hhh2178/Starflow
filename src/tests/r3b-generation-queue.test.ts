@@ -31,11 +31,71 @@ import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import { enqueueAssetImageJob, enqueueNovelEventJobs, enqueueStoryboardImageJobs, enqueueVideoJobs } from "@/services/generationWorkflows";
 import { completeGenerationUsage } from "@/services/generationUsage";
 import { getQuotaOverview, QuotaManagementError } from "@/services/quotaManagement";
-import getJobRouter from "@/routes/generation/getJob";
+import { createGetJobRouter } from "@/routes/generation/getJob";
 
 const zeroUsage = { total: 0, text: 0, image: 0, video: 0 };
 const defaultGroupLimit = { total: 4, text: 3, image: 2, video: 1 };
 const defaultUserLimit = { total: 2, text: 2, image: 1, video: 1 };
+const generationQueueOrderingIndex = "o_generationJob_queue_order_idx";
+const expectedGenerationQueueOrderingIndex = [
+  { name: "groupId", desc: 0 },
+  { name: "status", desc: 0 },
+  { name: "priority", desc: 1 },
+  { name: "queuedAt", desc: 0 },
+  { name: "id", desc: 0 },
+];
+
+async function getGenerationQueueOrderingIndex(db: ReturnType<typeof knex>) {
+  const indexes = await db.raw("PRAGMA index_list('o_generationJob')") as Array<{ name: string }>;
+  const matchingIndexes = indexes.filter((index) => index.name === generationQueueOrderingIndex);
+  if (matchingIndexes.length === 0) return { count: 0, columns: [] };
+  const indexColumns = await db.raw(`PRAGMA index_xinfo('${generationQueueOrderingIndex}')`) as Array<{
+    seqno: number;
+    name: string | null;
+    desc: number;
+    key: number;
+  }>;
+  return {
+    count: matchingIndexes.length,
+    columns: indexColumns
+      .filter((column) => column.key === 1)
+      .sort((left, right) => left.seqno - right.seqno)
+      .map((column) => ({ name: column.name, desc: column.desc })),
+  };
+}
+
+async function testGenerationQueueOrderingIndexMigration(db: ReturnType<typeof knex>): Promise<void> {
+  if ((await getGenerationQueueOrderingIndex(db)).count > 0) {
+    await db.schema.alterTable("o_generationJob", (table) => {
+      table.dropIndex(["groupId", "status", "priority", "queuedAt", "id"], generationQueueOrderingIndex);
+    });
+  }
+  assert.deepEqual(await getGenerationQueueOrderingIndex(db), { count: 0, columns: [] });
+  await migrateGenerationQueue(db);
+  assert.deepEqual(await getGenerationQueueOrderingIndex(db), {
+    count: 1,
+    columns: expectedGenerationQueueOrderingIndex,
+  });
+  await migrateGenerationQueue(db);
+  assert.deepEqual(await getGenerationQueueOrderingIndex(db), {
+    count: 1,
+    columns: expectedGenerationQueueOrderingIndex,
+  });
+}
+
+async function testFreshGenerationQueueOrderingIndex(): Promise<void> {
+  const freshDb = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
+  try {
+    await initDB(freshDb, false, false);
+    await initDB(freshDb, false, false);
+    assert.deepEqual(await getGenerationQueueOrderingIndex(freshDb), {
+      count: 1,
+      columns: expectedGenerationQueueOrderingIndex,
+    });
+  } finally {
+    await freshDb.destroy();
+  }
+}
 
 function testCapacityEvaluation(): void {
   assert.deepEqual(
@@ -647,21 +707,52 @@ async function testGenerationJobSafetyContract(db: ReturnType<typeof knex>): Pro
   assert.equal(completedJob.queuePosition, null);
 }
 
-async function testGetGenerationJobRouteValidation(): Promise<void> {
+async function testGetGenerationJobRouteHandler(db: ReturnType<typeof knex>): Promise<void> {
+  const actors = {
+    creatorA: { id: 3, name: "creator-a", role: "creator", groupId: 101 },
+    adminA: { id: 2, name: "admin-a", role: "admin", groupId: 101 },
+  } satisfies Record<string, AuthUser>;
   const app = express();
   app.use((req, _res, next) => {
-    (req as any).user = { id: 3, name: "creator-a", role: "creator", groupId: 101 } satisfies AuthUser;
+    (req as any).user = actors[String(req.headers["x-test-actor"] ?? "creatorA") as keyof typeof actors];
     next();
   });
-  app.use("/api/generation/getJob", getJobRouter);
+  app.use(
+    "/api/generation/getJob",
+    createGetJobRouter((actor, jobId) => getGenerationJob(actor, jobId, db)),
+  );
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
   try {
     const { port } = server.address() as AddressInfo;
+    const routeUrl = `http://127.0.0.1:${port}/api/generation/getJob`;
     for (const query of ["", "?id=0", "?id=-1", "?id=1.5", "?id=not-a-number"]) {
-      const response = await fetch(`http://127.0.0.1:${port}/api/generation/getJob${query}`);
+      const response = await fetch(`${routeUrl}${query}`);
       assert.equal(response.status, 400);
       assert.equal((await response.json()).code, 400);
+    }
+
+    const creatorJob = await db("o_generationJob").where({ idempotencyKey: "get-job-creator-visible" }).first();
+    const adminJob = await db("o_generationJob").where({ idempotencyKey: "get-job-admin-visible" }).first();
+    const groupBJob = await db("o_generationJob").where({ idempotencyKey: "get-job-other-group" }).first();
+    const successResponse = await fetch(`${routeUrl}?id=${creatorJob.id}`, {
+      headers: { "x-test-actor": "creatorA" },
+    });
+    assert.equal(successResponse.status, 200);
+    const successBody = await successResponse.json();
+    assert.equal(successBody.code, 200);
+    assert.equal(successBody.data.id, creatorJob.id);
+    assert.deepEqual(successBody.data.result, { text: "safe result" });
+
+    for (const [actor, jobId] of [
+      ["creatorA", adminJob.id],
+      ["creatorA", groupBJob.id],
+      ["adminA", groupBJob.id],
+    ] as const) {
+      const response = await fetch(`${routeUrl}?id=${jobId}`, { headers: { "x-test-actor": actor } });
+      assert.equal(response.status, 404);
+      const body = await response.json();
+      assert.equal(body.data.code, "JOB_NOT_FOUND");
     }
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
@@ -886,6 +977,9 @@ async function main(): Promise<void> {
       assert.equal(await db.schema.hasColumn(table, column), true, `${table}.${column} must exist`);
     }
 
+    await testGenerationQueueOrderingIndexMigration(db);
+    await testFreshGenerationQueueOrderingIndex();
+
     const now = Date.now();
     await db("o_group").insert([
       { id: 101, name: "A组", creatorLimit: 5, status: "enabled", createdAt: now, updatedAt: now },
@@ -912,7 +1006,7 @@ async function main(): Promise<void> {
     await testPolicyAuthorization(db);
     await testQueueAndAtomicClaim(db);
     await testGenerationJobSafetyContract(db);
-    await testGetGenerationJobRouteValidation();
+    await testGetGenerationJobRouteHandler(db);
     await testExpiredLeaseRecovery(db);
     await testWorkerLifecycle(db);
     await testUsageAndQuotaLedger(db);

@@ -4,6 +4,7 @@ import { Knex } from "knex";
 import { transform } from "sucrase";
 import rawVendorData from "./vendor.json";
 import { hashPassword } from "@/utils/password";
+import { ensureGenerationQueueOrderingIndex } from "@/lib/generationQueueSchema";
 
 const vendorData = rawVendorData as Record<string, string>;
 
@@ -196,6 +197,7 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
     table.integer("startedAt");
     table.integer("finishedAt");
   });
+  await ensureGenerationQueueOrderingIndex(knex);
   await ensureTable(knex, "o_usageLedger", (table) => {
     table.increments("id").primary();
     table.integer("jobId").notNullable().unique();

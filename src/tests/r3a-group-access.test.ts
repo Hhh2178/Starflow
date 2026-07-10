@@ -345,6 +345,8 @@ async function testAdminSession(): Promise<void> {
   let projectIds: number[] = [];
   let taskIds: number[] = [];
   let resourceIds: Record<string, number> | null = null;
+  let auditLogIds: number[] = [];
+  let auditActorIds: number[] = [1];
 
   try {
     const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
@@ -464,6 +466,7 @@ async function testAdminSession(): Promise<void> {
     assert.equal(adminUsers.body.data.length, 5);
     assert.ok(adminUsers.body.data.every((user: any) => user.role === "creator" && user.groupId === groupId));
     assert.equal(adminUsers.body.data.some((user: any) => user.id === userIds[3] || user.id === userIds[4]), false);
+    auditActorIds = [...new Set([1, ...userIds, ...adminUsers.body.data.map((user: any) => Number(user.id))])];
 
     const creatorSameGroupToken = await login(baseUrl, createdCreatorNames[0], password);
     const creatorOtherGroupToken = await login(baseUrl, creatorBName, password);
@@ -501,6 +504,12 @@ async function testAdminSession(): Promise<void> {
     assert.deepEqual(await visibleProjectIds(creatorSameGroupToken), [projectIds[1]]);
     assert.deepEqual((await visibleProjectIds(adminToken)).sort(), [projectIds[0], projectIds[1]].sort());
     assert.deepEqual(await visibleProjectIds(adminOtherGroupToken), [projectIds[2]]);
+
+    const sameGroupEdit = await request(baseUrl, "/api/project/editProject", adminToken, {
+      method: "POST",
+      body: JSON.stringify({ ...projectInput(`组内编辑-${suffix}`), id: projectIds[1] }),
+    });
+    assert.equal(sameGroupEdit.status, 200);
 
     const taskIdBase = Date.now() + 1000;
     taskIds = [taskIdBase, taskIdBase + 1, taskIdBase + 2];
@@ -668,8 +677,23 @@ async function testAdminSession(): Promise<void> {
     assert.equal(allGroups.status, 200);
     assert.ok(allGroups.body.data.some((group: any) => group.id === groupId));
     assert.ok(allGroups.body.data.some((group: any) => group.id === groupBId));
+
+    const auditLogs = await u
+      .db("o_auditLog")
+      .whereIn("actorUserId", auditActorIds)
+      .where("createdAt", ">=", now)
+      .select("id", "action", "summaryJson");
+    auditLogIds = auditLogs.map((log: any) => Number(log.id));
+    const auditActions = new Set(auditLogs.map((log: any) => log.action));
+    for (const action of ["user.create", "user.update.rejected", "user.password_reset.rejected", "project.create", "project.update", "group.update", "resource.access.rejected"]) {
+      assert.equal(auditActions.has(action), true, `missing audit action ${action}`);
+    }
+    for (const log of auditLogs) {
+      assert.doesNotMatch(String(log.summaryJson), /password|passwordHash|apiKey|token/i);
+    }
   } finally {
     if (baseUrl) await closeServe();
+    if (auditLogIds.length) await u.db("o_auditLog").whereIn("id", auditLogIds).delete();
     if (resourceIds) {
       await u.db("o_video").where("id", resourceIds.video).delete();
       await u.db("o_videoTrack").where("id", resourceIds.track).delete();

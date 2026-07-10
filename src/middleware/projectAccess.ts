@@ -2,12 +2,32 @@ import type { RequestHandler } from "express";
 import { error } from "@/lib/responseFormat";
 import { getAuthUser } from "@/middleware/auth";
 import { getAccessibleProject, getProjectIdForResource, ResourceKind } from "@/services/accessScope";
+import { writeAudit } from "@/services/auditLog";
+
+async function sendAccessRejection(
+  req: Parameters<RequestHandler>[0],
+  res: Parameters<RequestHandler>[1],
+  message: string,
+  reasonCode: string,
+  status: number = 404,
+) {
+  const actor = getAuthUser(req);
+  await writeAudit({
+    actor,
+    groupId: actor.groupId,
+    action: "resource.access.rejected",
+    targetType: "resource",
+    summary: { route: req.path, reasonCode },
+    result: "failure",
+  });
+  return res.status(status).send(error(message));
+}
 
 export function requireProjectAccess(field: string = "projectId"): RequestHandler {
   return async (req, res, next) => {
     const projectId = Number(req.body?.[field] ?? req.query?.[field] ?? req.params?.[field]);
     const project = Number.isFinite(projectId) ? await getAccessibleProject(getAuthUser(req), projectId) : undefined;
-    if (!project) return res.status(404).send(error("项目不存在或当前账号无权访问"));
+    if (!project) return sendAccessRejection(req, res, "项目不存在或当前账号无权访问", "PROJECT_NOT_ACCESSIBLE");
     res.locals.project = project;
     next();
   };
@@ -127,7 +147,7 @@ export const requireScopedProductionAccess: RequestHandler = async (req, res, ne
   if (!protectedRoutePrefix.test(req.path)) return next();
   const actor = getAuthUser(req);
   if (superAdminOnlyGlobalMutations.has(req.path) && actor.role !== "super_admin") {
-    return res.status(403).send(error("仅超级管理员可修改全局手册"));
+    return sendAccessRejection(req, res, "仅超级管理员可修改全局手册", "SUPER_ADMIN_REQUIRED", 403);
   }
   const body = req.body ?? {};
   const resolvedProjectIds: number[] = [];
@@ -135,7 +155,7 @@ export const requireScopedProductionAccess: RequestHandler = async (req, res, ne
   if (body.projectId !== undefined && body.projectId !== null) {
     const projectId = Number(body.projectId);
     if (!Number.isFinite(projectId) || !(await getAccessibleProject(actor, projectId))) {
-      return res.status(404).send(error("项目不存在或当前账号无权访问"));
+      return sendAccessRejection(req, res, "项目不存在或当前账号无权访问", "PROJECT_NOT_ACCESSIBLE");
     }
     resolvedProjectIds.push(projectId);
   }
@@ -150,26 +170,26 @@ export const requireScopedProductionAccess: RequestHandler = async (req, res, ne
     if (rawValue === undefined || rawValue === null) continue;
     const ids = (Array.isArray(rawValue) ? rawValue : [rawValue]).map(Number);
     for (const id of ids) {
-      if (!Number.isFinite(id)) return res.status(404).send(error("资源不存在或当前账号无权访问"));
+      if (!Number.isFinite(id)) return sendAccessRejection(req, res, "资源不存在或当前账号无权访问", "RESOURCE_ID_INVALID");
       const projectId = await getProjectIdForResource(policy.kind, id);
       if (projectId === null || !(await getAccessibleProject(actor, projectId))) {
-        return res.status(404).send(error("资源不存在或当前账号无权访问"));
+        return sendAccessRejection(req, res, "资源不存在或当前账号无权访问", "RESOURCE_NOT_ACCESSIBLE");
       }
       resolvedProjectIds.push(projectId);
     }
   }
 
   for (const reference of nestedResourceReferences(req.path, body)) {
-    if (!Number.isFinite(reference.id)) return res.status(404).send(error("资源不存在或当前账号无权访问"));
+    if (!Number.isFinite(reference.id)) return sendAccessRejection(req, res, "资源不存在或当前账号无权访问", "RESOURCE_ID_INVALID");
     const projectId = await getProjectIdForResource(reference.kind, reference.id);
     if (projectId === null || !(await getAccessibleProject(actor, projectId))) {
-      return res.status(404).send(error("资源不存在或当前账号无权访问"));
+      return sendAccessRejection(req, res, "资源不存在或当前账号无权访问", "RESOURCE_NOT_ACCESSIBLE");
     }
     resolvedProjectIds.push(projectId);
   }
 
   if (new Set(resolvedProjectIds).size > 1) {
-    return res.status(404).send(error("请求中的资源不属于同一项目"));
+    return sendAccessRejection(req, res, "请求中的资源不属于同一项目", "RESOURCE_PROJECT_MISMATCH");
   }
   next();
 };

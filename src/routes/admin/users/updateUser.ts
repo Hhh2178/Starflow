@@ -3,8 +3,9 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { getAuthUser } from "@/middleware/auth";
 import { validateFields } from "@/middleware/middleware";
-import { updateScopedUser } from "@/services/groupManagement";
+import { ManagementError, updateScopedUser } from "@/services/groupManagement";
 import { sendManagementError } from "@/lib/managementError";
+import { writeAudit } from "@/services/auditLog";
 
 const router = express.Router();
 
@@ -18,10 +19,20 @@ export default router.post(
     groupId: z.number().int().positive().optional(),
   }),
   async (req, res) => {
+    const actor = getAuthUser(req);
     try {
-      const data = await updateScopedUser(getAuthUser(req), req.body);
+      const data = await updateScopedUser(actor, req.body);
       return res.send(success(data, "用户更新成功"));
     } catch (cause) {
+      await writeAudit({
+        actor,
+        groupId: actor.groupId,
+        action: "user.update.rejected",
+        targetType: "user",
+        targetId: req.body.id,
+        summary: { changedFields: Object.keys(req.body).filter((key) => key !== "id").sort().join(","), reasonCode: cause instanceof ManagementError ? cause.code : "UNEXPECTED" },
+        result: "failure",
+      });
       return sendManagementError(res, cause);
     }
   },

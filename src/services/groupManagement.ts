@@ -3,6 +3,7 @@ import u from "@/utils";
 import { db } from "@/utils/db";
 import { hashPassword } from "@/utils/password";
 import { SAFE_USER_COLUMNS, SafeUser, toSafeUser } from "@/services/userManagement";
+import { writeAudit } from "@/services/auditLog";
 
 export interface GroupDto {
   id: number;
@@ -114,6 +115,15 @@ export async function createGroup(actor: AuthUser, input: CreateGroupInput): Pro
       updatedAt: now,
     });
     await trx("o_user").where("id", input.adminUserId).update({ groupId: id, updatedAt: now });
+    await writeAudit({
+      actor,
+      groupId: Number(id),
+      action: "group.create",
+      targetType: "group",
+      targetId: Number(id),
+      summary: { name: input.name.trim(), creatorLimit: input.creatorLimit, status: input.status },
+      result: "success",
+    }, trx);
     return toGroupDto(await trx("o_group").where("id", id).first());
   });
 }
@@ -159,6 +169,15 @@ export async function updateGroup(actor: AuthUser, input: UpdateGroupInput): Pro
         ...(input.status !== undefined ? { status: input.status } : {}),
         updatedAt: now,
       });
+    await writeAudit({
+      actor,
+      groupId: input.id,
+      action: "group.update",
+      targetType: "group",
+      targetId: input.id,
+      summary: { changedFields: Object.keys(input).filter((key) => key !== "id").sort().join(",") },
+      result: "success",
+    }, trx);
     return toGroupDto(await trx("o_group").where("id", input.id).first());
   });
 }
@@ -225,6 +244,16 @@ export async function createScopedUser(actor: AuthUser, input: CreateUserInput):
       await trx("o_user").where("id", id).update({ groupId });
     }
 
+    await writeAudit({
+      actor,
+      groupId,
+      action: "user.create",
+      targetType: "user",
+      targetId: id,
+      summary: { name, role, status, groupId },
+      result: "success",
+    }, trx);
+
     return toSafeUser(await trx("o_user").select(SAFE_USER_COLUMNS).where("id", id).first());
   });
 }
@@ -270,6 +299,15 @@ export async function updateScopedUser(actor: AuthUser, input: UpdateUserInput):
     }
 
     await trx("o_user").where("id", input.id).update({ name, role, status, groupId, updatedAt: Date.now() });
+    await writeAudit({
+      actor,
+      groupId,
+      action: "user.update",
+      targetType: "user",
+      targetId: input.id,
+      summary: { changedFields: Object.keys(input).filter((key) => key !== "id").sort().join(","), role, status, groupId },
+      result: "success",
+    }, trx);
     return toSafeUser(await trx("o_user").select(SAFE_USER_COLUMNS).where("id", input.id).first());
   });
 }
@@ -283,5 +321,15 @@ export async function resetScopedPassword(actor: AuthUser, id: number, password:
       mustChangePassword: true,
       updatedAt: Date.now(),
     });
+    const target = await trx("o_user").where("id", id).select("groupId").first();
+    await writeAudit({
+      actor,
+      groupId: target?.groupId == null ? null : Number(target.groupId),
+      action: "user.password_reset",
+      targetType: "user",
+      targetId: id,
+      summary: {},
+      result: "success",
+    }, trx);
   });
 }

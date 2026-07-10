@@ -5,6 +5,7 @@ import { success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { getAuthUser } from "@/middleware/auth";
 import { db } from "@/utils/db";
+import { writeAudit } from "@/services/auditLog";
 const router = express.Router();
 
 // 新增项目
@@ -55,6 +56,15 @@ export default router.post(
         imageQuality,
         mode,
       });
+      await writeAudit({
+        actor,
+        groupId,
+        action: "project.create",
+        targetType: "project",
+        targetId: projectId,
+        summary: { name, projectId, ownerUserId: actor.id, groupId },
+        result: "success",
+      }, trx);
       return projectId;
     });
 

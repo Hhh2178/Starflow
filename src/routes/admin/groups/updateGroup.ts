@@ -3,8 +3,9 @@ import { z } from "zod";
 import { success } from "@/lib/responseFormat";
 import { getAuthUser } from "@/middleware/auth";
 import { validateFields } from "@/middleware/middleware";
-import { updateGroup } from "@/services/groupManagement";
+import { ManagementError, updateGroup } from "@/services/groupManagement";
 import { sendManagementError } from "@/lib/managementError";
+import { writeAudit } from "@/services/auditLog";
 
 const router = express.Router();
 
@@ -18,10 +19,20 @@ export default router.post(
     status: z.enum(["enabled", "disabled"]).optional(),
   }),
   async (req, res) => {
+    const actor = getAuthUser(req);
     try {
-      const data = await updateGroup(getAuthUser(req), req.body);
+      const data = await updateGroup(actor, req.body);
       return res.send(success(data, "分组更新成功"));
     } catch (cause) {
+      await writeAudit({
+        actor,
+        groupId: req.body.id,
+        action: "group.update.rejected",
+        targetType: "group",
+        targetId: req.body.id,
+        summary: { changedFields: Object.keys(req.body).filter((key) => key !== "id").sort().join(","), reasonCode: cause instanceof ManagementError ? cause.code : "UNEXPECTED" },
+        result: "failure",
+      });
       return sendManagementError(res, cause);
     }
   },

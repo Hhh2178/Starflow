@@ -5,6 +5,7 @@ import { error, success } from "@/lib/responseFormat";
 import { validateFields } from "@/middleware/middleware";
 import { getAuthUser } from "@/middleware/auth";
 import { requireProjectAccess } from "@/middleware/projectAccess";
+import { writeAudit } from "@/services/auditLog";
 const router = express.Router();
 
 // 删除项目
@@ -16,7 +17,17 @@ export default router.post(
   requireProjectAccess("id"),
   async (req, res) => {
     const { id } = req.body;
-    if (getAuthUser(req).role !== "super_admin") {
+    const actor = getAuthUser(req);
+    if (actor.role !== "super_admin") {
+      await writeAudit({
+        actor,
+        groupId: res.locals.project.groupId,
+        action: "project.delete.rejected",
+        targetType: "project",
+        targetId: id,
+        summary: { projectId: id, reasonCode: "SUPER_ADMIN_REQUIRED" },
+        result: "failure",
+      });
       return res.status(403).send(error("仅超级管理员可永久删除项目"));
     }
     //删除项目
@@ -63,6 +74,16 @@ export default router.post(
     } catch (error: any) {
       console.log(`项目 ${id} 没有对应的OSS文件夹，跳过删除`);
     }
+
+    await writeAudit({
+      actor,
+      groupId: res.locals.project.groupId,
+      action: "project.delete",
+      targetType: "project",
+      targetId: id,
+      summary: { projectId: id, ownerUserId: res.locals.project.ownerUserId },
+      result: "success",
+    });
 
     res.status(200).send(success({ message: "删除项目成功" }));
   },

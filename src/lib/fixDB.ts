@@ -464,7 +464,7 @@ export default async (knex: Knex): Promise<void> => {
     u.vendor.writeCode("minimax", vendorData["minimax.ts"]);
   }
   const toonflowVer = await u.vendor.getVendor("toonflow").version;
-  if (Number(toonflowVer) < 3.2) {
+  if (Number(toonflowVer) < 3.3) {
     u.vendor.writeCode("toonflow", vendorData["toonflow.ts"]);
   }
 };

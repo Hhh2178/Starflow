@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - DeepSeek
+ * Stars Flow AI 供应商模板 - DeepSeek
  * @version 2.1
  */
 
@@ -128,7 +128,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "deepseek",
   version: "2.1",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "DeepSeek",
   description:
     "DeepSeek 官方接口适配，支持 V4 系列模型与思考模式（思维链输出）。\n\n[前往平台](https://platform.deepseek.com/)",

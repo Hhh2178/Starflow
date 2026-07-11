@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - AtlasCloud MASS
+ * Stars Flow AI 供应商模板 - AtlasCloud MASS
  * @version 0.8
  *
  * 说明：
@@ -136,7 +136,7 @@ const vendor: VendorConfig = {
   version: "1.0",
   author: "AtlasCloud",
   name: "AtlasCloud MASS",
-  description: "AtlasCloud 全模态平台接入 Toonflow。默认按官方文档填写文本、图片、视频与任务轮询路径。",
+  description: "AtlasCloud 全模态平台接入 Stars Flow。默认按官方文档填写文本、图片、视频与任务轮询路径。",
   inputs: [
     { key: "apiKey", label: "API密钥", type: "password", required: true, placeholder: "AtlasCloud API Key" },
     { key: "chatBaseUrl", label: "文本基地址", type: "url", required: true, placeholder: "https://api.atlascloud.ai/v1", disabled: true },

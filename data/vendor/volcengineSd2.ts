@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - 火山引擎(豆包)
+ * Stars Flow AI 供应商模板 - 火山引擎(豆包)
  * @version 2.0
  */
 
@@ -145,7 +145,7 @@ const TIMEOUT = 120_000;
 const vendor: VendorConfig = {
   id: "volcengineSd2",
   version: "2.0",
-  author: "toonflow",
+  author: "Stars Flow",
   name: "火山引擎sd2.0真人",
   description: "火山引擎豆包大模型，支持文本、图片生成、视频生成等能力。\n\n需要在[火山引擎控制台](https://console.volcengine.com/ark)获取API密钥。",
   icon: "",

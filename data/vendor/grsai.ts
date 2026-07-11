@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板
+ * Stars Flow AI 供应商模板
  * @version 2.0
  */
 
@@ -143,7 +143,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "grsai",
   version: "2.2",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "Grsai",
   description: "Grsai AI平台适配，支持文生图、图生图、文生视频、Gemini兼容文本模型 \n [前往中转平台](https://tf.grsai.ai/zh)",
   inputs: [

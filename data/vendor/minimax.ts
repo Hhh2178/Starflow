@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - MiniMax(海螺AI)
+ * Stars Flow AI 供应商模板 - MiniMax(海螺AI)
  * @version 2.0
  */
 
@@ -135,7 +135,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "minimax",
   version: "2.1",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "MiniMax(海螺AI)",
   description: "MiniMax官方接口适配，支持M系列推理文本模型、文生图/图生图、视频生成（文生视频、图生视频、首尾帧生成）能力 \n [前往平台](https://minimaxi.com/)",
   inputs: [

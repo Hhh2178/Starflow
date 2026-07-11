@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - 可灵AI
+ * Stars Flow AI 供应商模板 - 可灵AI
  * @version 2.0
  */
 
@@ -134,7 +134,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "klingai",
   version: "2.0",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "可灵AI",
   description:
     "可灵AI视频生成\n\n支持可灵全系列视频模型，包括 kling-video-o1、kling-v3-omni、kling-v3、kling-v2-6、kling-v2-5-turbo、kling-v2-1、kling-v2-master、kling-v1-6、kling-v1-5、kling-v1 等。\n\n需要在[可灵AI开放平台](https://klingai.com)\n\n获取 Access Key 和 Secret Key。",

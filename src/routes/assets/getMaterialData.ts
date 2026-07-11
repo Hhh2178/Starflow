@@ -30,7 +30,7 @@ export default router.post(
     const ending = await u.oss.getFileUrl("/ending.mp4", "assets");
     data.push({
       id: 0,
-      name: "Toonflow片尾",
+      name: "Stars Flow 片尾",
       filePath: ending,
       type: "clip",
     });

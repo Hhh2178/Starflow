@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板
+ * Stars Flow AI 供应商模板
  * @version 2.0
  */
 
@@ -134,7 +134,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "null",
   version: "2.0",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "空模板",
   description: "## 开发模板，您可以使用此模板进行Vibe Coding",
   inputs: [
@@ -196,7 +196,7 @@ export {};
  * ============================================================
  *
  * 【概述】
- * 本文件是 Toonflow AI 供应商适配模板。AI 在生成新供应商适配代码时，
+ * 本文件是 Stars Flow AI 供应商适配模板。AI 在生成新供应商适配代码时，
  * 必须严格遵守以下规则，并要求用户提供目标平台的 curl 调用示例或 API 文档信息作为输入依据。
  *
  * 【前置要求】

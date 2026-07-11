@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板
+ * Stars Flow AI 供应商模板
  * @version 2.0
  */
 // ============================================================
@@ -113,7 +113,7 @@ declare const exports: {
 const vendor: VendorConfig = {
   id: "openai",
   version: "2.0",
-  author: "Toonflow",
+  author: "Stars Flow",
   name: "OpenAI标准接口",
   description: "OpenAI标准格式接口，可修改请求地址并手动添加模型。",
   icon: "",

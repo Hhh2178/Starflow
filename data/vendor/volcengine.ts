@@ -1,5 +1,5 @@
 /**
- * Toonflow AI供应商模板 - 火山引擎(豆包)
+ * Stars Flow AI 供应商模板 - 火山引擎(豆包)
  * @version 2.0
  */
 

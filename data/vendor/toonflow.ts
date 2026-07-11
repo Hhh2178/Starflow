@@ -1,6 +1,6 @@
 /**
- * Toonflow官方中转平台 供应商适配
- * @version 3.0
+ * Stars Flow 服务平台供应商适配
+ * @version 3.3
  */
 
 // ============================================================
@@ -133,11 +133,11 @@ declare const exports: {
 
 const vendor: VendorConfig = {
   id: "toonflow",
-  version: "3.2",
-  author: "Toonflow",
-  name: "Toonflow官方中转平台",
+  version: "3.3",
+  author: "Stars Flow",
+  name: "Stars Flow 服务平台",
   description:
-    "## Toonflow官方中转平台\n\nToonflow官方中转平台，提供**文本、图像、视频、音频**等多模态生成能力的中转服务，支持接入多个大模型供应商，方便用户统一管理和调用不同供应商的生成能力。\n\n🔗 [前往中转平台](https://api.toonflow.net/)\n\n如果这个项目对你有帮助，可以考虑支持一下我们的开发工作 ☕",
+    "Stars Flow 内部统一模型服务入口。充值与服务商扩展能力当前仅保留管理外壳，正式接入后再启用。",
   icon: "",
   inputs: [{ key: "apiKey", label: "API密钥", type: "password", required: true }],
   inputValues: {

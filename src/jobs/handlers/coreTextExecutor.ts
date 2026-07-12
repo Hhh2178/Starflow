@@ -8,6 +8,7 @@ import type { TextGenerationPayload } from "@/jobs/handlers/textGeneration";
 import { jsonSchema, tool } from "ai";
 import { z } from "zod";
 import { executeQueuedAgent } from "@/services/agentQueue";
+import { normalizeTextUsage } from "@/services/generationMetering";
 
 type ExecutorConnection = Knex | Knex.Transaction;
 
@@ -24,14 +25,18 @@ export interface CoreTextExecutorDependencies {
   readFile?: (filePath: string) => Promise<string>;
   getArtPrompt?: (styleName: string, source: string, fileName: string) => string;
   getImageBase64?: (path: string) => Promise<string>;
-  invokeText?: (model: "universalAi", input: TextInvocationInput) => Promise<{ text: string; _output?: string }>;
+  invokeText?: (model: "universalAi", input: TextInvocationInput) => Promise<{
+    text: string;
+    _output?: string;
+    usage?: { inputTokens?: number; outputTokens?: number; promptTokens?: number; completionTokens?: number };
+  }>;
 }
 
-function unknownCostMetering(modelId: string) {
+function unknownCostMetering(modelId: string, response?: unknown) {
   return {
     providerId: null,
     modelId,
-    units: {},
+    units: normalizeTextUsage(response),
     estimatedCost: null,
     currency: null,
     pricingSnapshot: {},
@@ -90,7 +95,7 @@ async function executeStylePrompt(
   });
   const prompt = response.text?.trim();
   if (!prompt) throw new Error("画风分析未返回结果");
-  return { result: { prompt }, metering: unknownCostMetering(payload.model) };
+  return { result: { prompt }, metering: unknownCostMetering(payload.model, response) };
 }
 
 const assetPromptConfig = {
@@ -132,7 +137,7 @@ async function executeAssetPrompt(
       promptState: "已完成",
       promptErrorReason: null,
     });
-    return { result: { assetId: payload.targetId, prompt }, metering: unknownCostMetering(payload.model) };
+    return { result: { assetId: payload.targetId, prompt }, metering: unknownCostMetering(payload.model, response) };
   } catch (cause) {
     await connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({
       promptState: "生成失败",
@@ -167,7 +172,7 @@ async function executeAssetAudio(
   try {
     const audioList = audioRows.map((item: any) => `ID:${item.id} 名称:${item.name} 描述:${item.describe || "无"}`).join("\n");
     await markProviderSubmission(context, payload.operation);
-    await dependencies.invokeText("universalAi", {
+    const response = await dependencies.invokeText("universalAi", {
       messages: [
         { role: "system", content: promptRow?.useData || promptRow?.data || "匹配最合适的音频" },
         { role: "user", content: `候选音频列表\n${audioList}\n待匹配资产：${asset.name || "未命名"} ${asset.describe || ""}` },
@@ -185,7 +190,7 @@ async function executeAssetAudio(
       }
       await trx("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({ audioBindState: "已完成" });
     });
-    return { result: { assetId: payload.targetId, audioId: selectedAudioId }, metering: unknownCostMetering(payload.model) };
+    return { result: { assetId: payload.targetId, audioId: selectedAudioId }, metering: unknownCostMetering(payload.model, response) };
   } catch (cause) {
     await connection("o_assets").where({ id: payload.targetId, projectId: payload.projectId }).update({ audioBindState: "生成失败" });
     throw cause;
@@ -224,7 +229,7 @@ async function executeScriptAssets(
   try {
     const existingList = existingAssets.map((asset: any) => `${asset.name}(${asset.type})`).join("、");
     await markProviderSubmission(context, payload.operation);
-    await dependencies.invokeText("universalAi", {
+    const response = await dependencies.invokeText("universalAi", {
       messages: [
         { role: "system", content: promptRow?.useData || promptRow?.data || "提取角色、场景和道具，并调用工具提交" },
         { role: "user", content: `已有资产：${existingList}\n剧本：${script.content || ""}` },
@@ -251,7 +256,7 @@ async function executeScriptAssets(
       await trx("o_script").where({ id: payload.targetId, projectId: payload.projectId }).update({ extractState: 1, errorReason: null });
       assetCount = rows.length;
     });
-    return { result: { scriptId: payload.targetId, assetCount }, metering: unknownCostMetering(payload.model) };
+    return { result: { scriptId: payload.targetId, assetCount }, metering: unknownCostMetering(payload.model, response) };
   } catch (cause) {
     await connection("o_script").where({ id: payload.targetId, projectId: payload.projectId }).update({ extractState: -1, errorReason: errorMessage(cause).slice(0, 500) });
     throw cause;
@@ -269,7 +274,7 @@ async function executeAiRegex(
     messages: [{ role: "user", content: payload.content }],
     abortSignal: context.signal,
   });
-  return { result: { regex: (response.text || "").trim() }, metering: unknownCostMetering(payload.model) };
+  return { result: { regex: (response.text || "").trim() }, metering: unknownCostMetering(payload.model, response) };
 }
 
 async function executeNovelEvents(
@@ -407,13 +412,14 @@ async function executeVideoPrompt(
     };
     const content = JSON.stringify(structuredPromptData);
     await context.setProviderRequestId(`video-prompt:${context.jobId}`);
-    const { text } = await invokeText("universalAi", {
+    const response = await invokeText("universalAi", {
       system: systemPrompt,
       messages: [
         { role: "assistant", content: visualManual },
         { role: "user", content },
       ],
     });
+    const { text } = response;
     if (!text) throw new Error("视频提示词生成失败：模型未返回内容");
 
     await connection("o_videoTrack").where({ id: payload.targetId, projectId: payload.projectId }).update({
@@ -423,7 +429,7 @@ async function executeVideoPrompt(
     });
     return {
       result: { trackId: payload.targetId, prompt: text },
-      metering: unknownCostMetering(payload.model),
+      metering: unknownCostMetering(payload.model, response),
     };
   } catch (cause) {
     await connection("o_videoTrack").where({ id: payload.targetId, projectId: payload.projectId }).update({

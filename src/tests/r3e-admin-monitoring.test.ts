@@ -57,7 +57,7 @@ async function main() {
     ]);
     await db("o_usageLedger").insert([
       { jobId: 401, groupId: 101, userId: 3, projectId: 201, providerId: "provider-a", modelId: "image-a", taskType: "image", unitJson: "{}", estimatedCost: 1.123456, currency: "CNY", pricingSnapshotJson: "{}", result: "succeeded", createdAt: 4000 },
-      { jobId: 402, groupId: 102, userId: 5, projectId: 203, providerId: "provider-b", modelId: "text-b", taskType: "text", unitJson: "{}", estimatedCost: 9.5, currency: "CNY", pricingSnapshotJson: "{}", result: "succeeded", createdAt: 5000 },
+      { jobId: 402, groupId: 102, userId: 5, projectId: 203, providerId: "provider-b", modelId: "text-b", taskType: "text", unitJson: "{}", estimatedCost: 9.5, currency: "CNY", pricingSnapshotJson: JSON.stringify({ fixture: true }), result: "succeeded", createdAt: 5000 },
     ]);
 
     const superProjects = await listAdminProjects(actors.superAdmin, { page: 1, pageSize: 20 }, db);
@@ -81,10 +81,23 @@ async function main() {
     const superUsage = await getUsageOverview(actors.superAdmin, { page: 1, pageSize: 20 }, db);
     assert.deepEqual(superUsage.summary, { recordCount: 2, estimatedCost: 10.623456 });
     assert.deepEqual(superUsage.breakdown.map((item) => item.taskType), ["image", "text"]);
+    assert.deepEqual(superUsage.items.map((item) => item.pricingSnapshot), [null, null]);
+    assert.deepEqual(superUsage.items.map((item) => item.billingMode), [null, null]);
     const adminUsage = await getUsageOverview(actors.adminA, { page: 1, pageSize: 20 }, db);
     assert.deepEqual(adminUsage.summary, { recordCount: 1, estimatedCost: 1.123456 });
     assert.deepEqual(adminUsage.items.map((item) => item.jobId), [401]);
     assert.equal(adminUsage.items[0].groupName, "A组");
+    assert.equal(adminUsage.items[0].pricingSnapshot, null);
+    assert.equal(adminUsage.items[0].billingMode, null);
+
+    const validSnapshot = {
+      pricingId: 7, providerId: "provider-a", modelId: "image-a", taskType: "image", billingMode: "per_request",
+      requestPrice: 1.123456, currency: "CNY", version: 2, effectiveAt: now,
+    };
+    await db("o_usageLedger").where({ jobId: 401 }).update({ pricingSnapshotJson: JSON.stringify(validSnapshot) });
+    const usageWithSnapshot = await getUsageOverview(actors.adminA, { page: 1, pageSize: 20 }, db);
+    assert.deepEqual(usageWithSnapshot.items[0].pricingSnapshot, validSnapshot);
+    assert.equal(usageWithSnapshot.items[0].billingMode, "per_request");
 
     await expectMonitoringError(listAdminTasks(actors.creatorA, { page: 1, pageSize: 20 }, db), 403, "ADMIN_REQUIRED");
     await expectMonitoringError(getUsageOverview(actors.adminA, { page: 1, pageSize: 20, groupId: 102 }, db), 404, "SCOPE_NOT_FOUND");

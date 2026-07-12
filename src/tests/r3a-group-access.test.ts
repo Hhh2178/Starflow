@@ -365,6 +365,7 @@ async function testAdminSession(): Promise<void> {
   const creatorBName = `r3a-creator-b-${suffix}`;
   const createdCreatorNames = Array.from({ length: 5 }, (_, index) => `r3a-created-${index}-${suffix}`);
   const forbiddenAdminName = `r3a-forbidden-${suffix}`;
+  const quotaAdminName = `r3a-quota-admin-${suffix}`;
   const projectNames = [`r3a-project-a-${suffix}`, `r3a-project-b-${suffix}`, `r3a-project-c-${suffix}`];
   const password = "TempPass123";
   const now = Date.now();
@@ -377,6 +378,8 @@ async function testAdminSession(): Promise<void> {
   let resourceIds: Record<string, number> | null = null;
   let auditLogIds: number[] = [];
   let auditActorIds: number[] = [1];
+  let quotaAdminId: number | null = null;
+  let quotaGroupId: number | null = null;
 
   try {
     const maxUser = await u.db("o_user").max<{ maxId: number | null }>("id as maxId").first();
@@ -676,6 +679,25 @@ async function testAdminSession(): Promise<void> {
     assert.equal(adminCreateAdmin.status, 403);
 
     const superAdminToken = await login(baseUrl, "admin", "admin123");
+    const quotaAdmin = await request(baseUrl, "/api/admin/users/createUser", superAdminToken, {
+      method: "POST",
+      body: JSON.stringify({
+        name: quotaAdminName,
+        password,
+        role: "admin",
+        groupName: `R3A Quota ${suffix}`,
+        creatorLimit: 2,
+      }),
+    });
+    assert.equal(quotaAdmin.status, 200);
+    quotaAdminId = Number(quotaAdmin.body.data.id);
+    quotaGroupId = Number(quotaAdmin.body.data.groupId);
+    const quotaAccount = await u.db("o_quotaAccount").where({ groupId: quotaGroupId }).first();
+    assert.deepEqual(
+      quotaAccount && { groupId: Number(quotaAccount.groupId), balance: Number(quotaAccount.balance) },
+      { groupId: quotaGroupId, balance: 0 },
+    );
+
     const changeRoleWithoutRebinding = await request(baseUrl, "/api/admin/users/updateUser", superAdminToken, {
       method: "POST",
       body: JSON.stringify({ id: userIds[4], role: "admin" }),
@@ -735,6 +757,9 @@ async function testAdminSession(): Promise<void> {
     }
     if (taskIds.length) await u.db("o_tasks").whereIn("id", taskIds).delete();
     if (projectIds.length) await u.db("o_project").whereIn("id", projectIds).delete();
+    if (quotaGroupId !== null) await u.db("o_quotaAccount").where("groupId", quotaGroupId).delete();
+    if (quotaAdminId !== null) await u.db("o_user").where("id", quotaAdminId).delete();
+    if (quotaGroupId !== null) await u.db("o_group").where("id", quotaGroupId).delete();
     await u.db("o_user").whereIn("name", [...createdCreatorNames, forbiddenAdminName]).delete();
     if (userIds.length) await u.db("o_user").whereIn("id", userIds).delete();
     if (groupId !== null) await u.db("o_group").where("id", groupId).delete();

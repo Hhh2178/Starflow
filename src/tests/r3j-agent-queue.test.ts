@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import knex from "knex";
 import initDB from "@/lib/initDB";
+import { migrateGenerationQueue } from "@/lib/fixDB";
 import type { AuthUser } from "@/types/auth";
 import {
   appendAgentJobEvent,
@@ -30,6 +31,21 @@ async function main() {
     ]);
     await db("o_scriptAssets").insert([{ scriptId: 801, assetId: 600 }, { scriptId: 801, assetId: 601 }]);
     await db("o_storyboard").insert({ id: 701, projectId: 1001, scriptId: 801, prompt: "wide shot", shouldGenerateImage: 1, state: "未生成" });
+    await db("o_agentDeploy").insert({
+      id: 1, key: "universalAi", name: "测试文本模型", vendorId: "test", modelName: "text", disabled: false,
+    });
+    await migrateGenerationQueue(db);
+    await db("o_modelPricing").insert([
+      {
+        providerId: "test", modelId: "text", taskType: "text", billingMode: "per_request", requestPrice: 0,
+        currency: "CNY", version: 1, status: "active", effectiveAt: now, createdBy: 1, createdAt: now,
+      },
+      {
+        providerId: "vendor", modelId: "image", taskType: "image", billingMode: "per_request", requestPrice: 0,
+        currency: "CNY", version: 1, status: "active", effectiveAt: now, createdBy: 1, createdAt: now,
+      },
+    ]);
+    await db("o_quotaAccount").where({ groupId: 101 }).update({ balance: 100 });
     const actor: AuthUser = { id: 3, name: "creator-a", role: "creator", groupId: 101 };
 
     const scriptJob = await enqueueAgentChatJob(actor, {
@@ -82,6 +98,7 @@ async function main() {
     });
     assert.equal(executed.result.agentType, "script_agent");
     assert.equal(executed.result.eventCount, 3);
+    assert.deepEqual(executed.metering.units, { requests: 1 });
     const replay = await listAgentJobEvents(scriptJob.jobId, 2, db);
     assert.deepEqual(replay.map((event) => event.event), ["message", "content:add", "message:update"]);
 

@@ -123,7 +123,47 @@ export default async (
         table.integer("queuedAt").notNullable();
         table.integer("startedAt");
         table.integer("finishedAt");
+        table.text("pricingSnapshotJson").notNullable().defaultTo("{}");
+        table.decimal("reservedAmount", 18, 6);
         addGenerationQueueOrderingIndex(table, knex);
+      },
+    },
+    {
+      name: "o_modelPricing",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.text("providerId").notNullable();
+        table.text("modelId").notNullable();
+        table.text("taskType").notNullable();
+        table.text("billingMode").notNullable();
+        table.decimal("requestPrice", 18, 6);
+        table.decimal("secondPrice", 18, 6);
+        table.decimal("inputPricePerMillion", 18, 6);
+        table.decimal("outputPricePerMillion", 18, 6);
+        table.decimal("fallbackRequestPrice", 18, 6);
+        table.text("currency").notNullable().defaultTo("CNY");
+        table.integer("version").notNullable();
+        table.text("status").notNullable();
+        table.integer("effectiveAt").notNullable();
+        table.integer("createdBy").notNullable();
+        table.integer("createdAt").notNullable();
+        table.unique(["providerId", "modelId", "version"]);
+      },
+    },
+    {
+      name: "o_quotaReservation",
+      builder: (table) => {
+        table.increments("id").primary();
+        table.integer("jobId").notNullable().unique();
+        table.integer("groupId").notNullable().index();
+        table.integer("pricingId").notNullable();
+        table.decimal("reservedAmount", 18, 6).notNullable();
+        table.decimal("finalAmount", 18, 6);
+        table.text("status").notNullable();
+        table.text("reason");
+        table.integer("createdAt").notNullable();
+        table.integer("settledAt");
+        table.integer("releasedAt");
       },
     },
     {
@@ -162,6 +202,8 @@ export default async (
       builder: (table) => {
         table.integer("groupId").primary();
         table.decimal("balance", 18, 6).notNullable().defaultTo(0);
+        table.decimal("reservedBalance", 18, 6).notNullable().defaultTo(0);
+        table.text("billingStatus").notNullable().defaultTo("active");
         table.integer("updatedAt").notNullable();
       },
     },
@@ -1107,7 +1149,7 @@ export default async (
         table.index(["attribution"]);
       },
       initData: async (knex) => {
-        await knex("o_skillAttribution").insert([
+        const defaultAttributions = [
           {
             skillId: "52c51fa8655f899a1b7aae9b6aad7251",
             attribution: "universal_agent.md",
@@ -1164,7 +1206,16 @@ export default async (
             skillId: "fce75f69d704c19bebcb356bc1bd6e81",
             attribution: "production_agent_execution.md",
           },
-        ]);
+        ];
+        const existingSkillIds = new Set(
+          await knex("o_skillList")
+            .whereIn("id", defaultAttributions.map((item) => item.skillId))
+            .pluck("id"),
+        );
+        const availableAttributions = defaultAttributions.filter((item) => existingSkillIds.has(item.skillId));
+        if (availableAttributions.length > 0) {
+          await knex("o_skillAttribution").insert(availableAttributions);
+        }
       },
     },
     //记忆表（message=原始消息, summary=压缩摘要）

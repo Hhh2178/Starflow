@@ -1,5 +1,31 @@
 export type GenerationTaskType = "text" | "image" | "video";
 
+export type BillingMode = "per_request" | "per_second" | "per_token";
+
+export interface PricingSnapshot {
+  pricingId: number;
+  providerId: string;
+  modelId: string;
+  taskType: GenerationTaskType;
+  billingMode: BillingMode;
+  requestPrice?: number;
+  secondPrice?: number;
+  inputPricePerMillion?: number;
+  outputPricePerMillion?: number;
+  fallbackRequestPrice?: number;
+  currency: "CNY";
+  version: number;
+  effectiveAt: number;
+}
+
+export interface BillingUnits {
+  requests?: number;
+  images?: number;
+  seconds?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export type GenerationJobStatus =
   | "queued"
   | "running"
@@ -34,7 +60,7 @@ export type CapacityDecision = { allowed: true } | { allowed: false; reason: Cap
 export interface MeteringResult {
   providerId: string | null;
   modelId: string | null;
-  units: Record<string, number>;
+  units: BillingUnits;
   estimatedCost: number | null;
   currency: string | null;
   pricingSnapshot: Record<string, string | number>;

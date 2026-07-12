@@ -21,6 +21,18 @@ const addColumn = async (knex: Knex, table: string, column: string, type: string
   }
 };
 
+const ensureColumn = async (
+  knex: Knex,
+  table: string,
+  column: string,
+  builder: (table: Knex.AlterTableBuilder) => void,
+) => {
+  if (!(await knex.schema.hasTable(table))) return;
+  if (!(await knex.schema.hasColumn(table, column))) {
+    await knex.schema.alterTable(table, builder);
+  }
+};
+
 export async function migrateGroupOwnership(knex: Knex): Promise<void> {
   await ensureTable(knex, "o_group", (table) => {
     table.increments("id").primary();
@@ -199,7 +211,45 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
     table.integer("startedAt");
     table.integer("finishedAt");
   });
+  await ensureColumn(knex, "o_generationJob", "pricingSnapshotJson", (table) => {
+    table.text("pricingSnapshotJson").notNullable().defaultTo("{}");
+  });
+  await ensureColumn(knex, "o_generationJob", "reservedAmount", (table) => {
+    table.decimal("reservedAmount", 18, 6);
+  });
   await ensureGenerationQueueOrderingIndex(knex);
+  await ensureTable(knex, "o_modelPricing", (table) => {
+    table.increments("id").primary();
+    table.text("providerId").notNullable();
+    table.text("modelId").notNullable();
+    table.text("taskType").notNullable();
+    table.text("billingMode").notNullable();
+    table.decimal("requestPrice", 18, 6);
+    table.decimal("secondPrice", 18, 6);
+    table.decimal("inputPricePerMillion", 18, 6);
+    table.decimal("outputPricePerMillion", 18, 6);
+    table.decimal("fallbackRequestPrice", 18, 6);
+    table.text("currency").notNullable().defaultTo("CNY");
+    table.integer("version").notNullable();
+    table.text("status").notNullable();
+    table.integer("effectiveAt").notNullable();
+    table.integer("createdBy").notNullable();
+    table.integer("createdAt").notNullable();
+    table.unique(["providerId", "modelId", "version"]);
+  });
+  await ensureTable(knex, "o_quotaReservation", (table) => {
+    table.increments("id").primary();
+    table.integer("jobId").notNullable().unique();
+    table.integer("groupId").notNullable().index();
+    table.integer("pricingId").notNullable();
+    table.decimal("reservedAmount", 18, 6).notNullable();
+    table.decimal("finalAmount", 18, 6);
+    table.text("status").notNullable();
+    table.text("reason");
+    table.integer("createdAt").notNullable();
+    table.integer("settledAt");
+    table.integer("releasedAt");
+  });
   await ensureTable(knex, "o_agentJobEvent", (table) => {
     table.increments("id").primary();
     table.integer("jobId").notNullable().index();
@@ -228,8 +278,18 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
   await ensureTable(knex, "o_quotaAccount", (table) => {
     table.integer("groupId").primary();
     table.decimal("balance", 18, 6).notNullable().defaultTo(0);
+    table.decimal("reservedBalance", 18, 6).notNullable().defaultTo(0);
+    table.text("billingStatus").notNullable().defaultTo("active");
     table.integer("updatedAt").notNullable();
   });
+  await ensureColumn(knex, "o_quotaAccount", "reservedBalance", (table) => {
+    table.decimal("reservedBalance", 18, 6).notNullable().defaultTo(0);
+  });
+  await ensureColumn(knex, "o_quotaAccount", "billingStatus", (table) => {
+    table.text("billingStatus").notNullable().defaultTo("active");
+  });
+  await knex("o_quotaAccount").where("balance", "<", 0).update({ billingStatus: "debt" });
+  await knex("o_quotaAccount").where("balance", ">=", 0).update({ billingStatus: "active" });
   await ensureTable(knex, "o_quotaLedger", (table) => {
     table.increments("id").primary();
     table.integer("groupId").notNullable().index();
@@ -244,6 +304,49 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
   });
 
   const now = Date.now();
+  const defaultModelPricing = [
+    {
+      providerId: "aicopy",
+      modelId: "grok-imagine-video-1.5-preview",
+      taskType: "video",
+      requestPrice: 0.18,
+    },
+    {
+      providerId: "grsai",
+      modelId: "gpt-image-2",
+      taskType: "image",
+      requestPrice: 0.06,
+    },
+    {
+      providerId: "mimo",
+      modelId: "mimo-v2.5",
+      taskType: "text",
+      requestPrice: 0.05,
+    },
+    {
+      providerId: "mimo",
+      modelId: "mimo-v2.5-pro",
+      taskType: "text",
+      requestPrice: 0.05,
+    },
+  ] as const;
+  for (const pricing of defaultModelPricing) {
+    const active = await knex("o_modelPricing")
+      .where({ providerId: pricing.providerId, modelId: pricing.modelId, status: "active" })
+      .first();
+    if (!active) {
+      await knex("o_modelPricing").insert({
+        ...pricing,
+        billingMode: "per_request",
+        currency: "CNY",
+        version: 1,
+        status: "active",
+        effectiveAt: now,
+        createdBy: 1,
+        createdAt: now,
+      });
+    }
+  }
   const groupDefaults = { totalLimit: 4, textLimit: 3, imageLimit: 2, videoLimit: 1 };
   const userDefaults = { totalLimit: 2, textLimit: 2, imageLimit: 1, videoLimit: 1 };
   const groups = await knex("o_group").select("id");
@@ -253,7 +356,13 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
       await knex("o_concurrencyPolicy").insert({ scopeType: "group", scopeId: groupId, ...groupDefaults, updatedBy: 1, createdAt: now, updatedAt: now });
     }
     if (!(await knex("o_quotaAccount").where({ groupId }).first())) {
-      await knex("o_quotaAccount").insert({ groupId, balance: 0, updatedAt: now });
+      await knex("o_quotaAccount").insert({
+        groupId,
+        balance: 0,
+        reservedBalance: 0,
+        billingStatus: "active",
+        updatedAt: now,
+      });
     }
   }
 

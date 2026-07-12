@@ -46,7 +46,7 @@ export async function executeCoreVideoGeneration(
       metering: {
         providerId: payload.model.split(/:(.+)/)[0] || null,
         modelId: payload.model,
-        units: { videos: 1, durationSeconds: payload.duration },
+        units: { requests: 1, seconds: payload.duration },
         estimatedCost: null,
         currency: null,
         pricingSnapshot: {},

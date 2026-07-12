@@ -1,6 +1,5 @@
 import type { Knex } from "knex";
 import type { AuthUser } from "@/types/auth";
-import { writeAudit } from "@/services/auditLog";
 import {
   fromMoneyMicros,
   hasMoneyPrecision,
@@ -68,7 +67,13 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
   const resolvedConnection = await resolveConnection(connection);
   let groupsQuery = resolvedConnection("o_group")
     .leftJoin("o_quotaAccount", "o_quotaAccount.groupId", "o_group.id")
-    .select("o_group.id", "o_group.name", "o_quotaAccount.balance")
+    .select(
+      "o_group.id",
+      "o_group.name",
+      "o_quotaAccount.balance",
+      "o_quotaAccount.reservedBalance",
+      "o_quotaAccount.billingStatus",
+    )
     .orderBy("o_group.id", "asc");
   let totalsQuery = resolvedConnection("o_quotaLedger")
     .select("groupId", "entryType", "amount");
@@ -106,24 +111,35 @@ export async function getQuotaOverview(actor: AuthUser, connection?: QuotaConnec
     if (row.entryType === "usage_debit") total.usageMicros += Math.abs(amountMicros);
     totals.set(groupId, total);
   }
-  const groupDtos = groups.map((group: any) => ({
-    groupId: Number(group.id),
-    groupName: String(group.name),
-    balance: normalizeMoney(Number(group.balance ?? 0)),
-    totalRecharge: fromMoneyMicros(totals.get(Number(group.id))?.rechargeMicros ?? 0),
-    totalUsage: fromMoneyMicros(totals.get(Number(group.id))?.usageMicros ?? 0),
-  }));
+  const groupDtos = groups.map((group: any) => {
+    const balanceMicros = toMoneyMicros(Number(group.balance ?? 0));
+    const reservedMicros = toMoneyMicros(Number(group.reservedBalance ?? 0));
+    return {
+      groupId: Number(group.id),
+      groupName: String(group.name),
+      balance: fromMoneyMicros(balanceMicros),
+      reservedBalance: fromMoneyMicros(reservedMicros),
+      availableBalance: fromMoneyMicros(balanceMicros - reservedMicros),
+      billingStatus: group.billingStatus === "debt" ? "debt" as const : "active" as const,
+      totalRecharge: fromMoneyMicros(totals.get(Number(group.id))?.rechargeMicros ?? 0),
+      totalUsage: fromMoneyMicros(totals.get(Number(group.id))?.usageMicros ?? 0),
+    };
+  });
   const summaryMicros = groupDtos.reduce(
     (summary, group) => ({
       balance: summary.balance + toMoneyMicros(group.balance),
+      reservedBalance: summary.reservedBalance + toMoneyMicros(group.reservedBalance),
       totalRecharge: summary.totalRecharge + toMoneyMicros(group.totalRecharge),
       totalUsage: summary.totalUsage + toMoneyMicros(group.totalUsage),
     }),
-    { balance: 0, totalRecharge: 0, totalUsage: 0 },
+    { balance: 0, reservedBalance: 0, totalRecharge: 0, totalUsage: 0 },
   );
   return {
     summary: {
       balance: fromMoneyMicros(summaryMicros.balance),
+      reservedBalance: fromMoneyMicros(summaryMicros.reservedBalance),
+      availableBalance: fromMoneyMicros(summaryMicros.balance - summaryMicros.reservedBalance),
+      billingStatus: groupDtos.some((group) => group.billingStatus === "debt") ? "debt" : "active",
       totalRecharge: fromMoneyMicros(summaryMicros.totalRecharge),
       totalUsage: fromMoneyMicros(summaryMicros.totalUsage),
     },
@@ -191,23 +207,31 @@ export async function adjustQuota(
     });
     await trx("o_quotaAccount")
       .where({ groupId: input.groupId })
-      .update({ balance: balanceAfter, updatedAt: createdAt });
-    await writeAudit({
-      actor,
+      .update({
+        balance: balanceAfter,
+        billingStatus: balanceAfterMicros < 0 ? "debt" : "active",
+        updatedAt: createdAt,
+      });
+    await trx("o_auditLog").insert({
+      actorUserId: actor.id,
+      actorRole: actor.role,
       groupId: input.groupId,
       action: "quota.adjust",
       targetType: "quota_account",
-      targetId: input.groupId,
-      summary: {
+      targetId: String(input.groupId),
+      targetRole: null,
+      summaryJson: JSON.stringify({
         groupId: input.groupId,
         entryType: input.entryType,
         amount: signedAmount,
         balanceBefore,
         balanceAfter,
         reason,
-      },
+      }),
       result: "success",
-    }, trx);
+      requestId: null,
+      createdAt,
+    });
 
     const updatedAccount = await trx("o_quotaAccount").where({ groupId: input.groupId }).first();
     const ledger = await trx("o_quotaLedger").where({ id: ledgerId }).first();

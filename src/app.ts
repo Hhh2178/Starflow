@@ -24,6 +24,15 @@ const app = express();
 const server = http.createServer(app);
 let stopScheduler: (() => Promise<void>) | null = null;
 
+export function resolveServerListenConfig(env: Record<string, string | undefined> = process.env) {
+  const rawPort = env.STARS_PORT?.trim() || "10588";
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("STARS_PORT 必须是 1 到 65535 之间的整数");
+  }
+  return { host: env.STARS_HOST?.trim() || "127.0.0.1", port };
+}
+
 async function checkPermissions() {
   if (!isEletron()) return true;
   const userDataPath = u.getPath();
@@ -64,6 +73,7 @@ export default async function startServe(randomPort: Boolean = false) {
   app.use(cors({ origin: "*" }));
   app.use(express.json({ limit: "100mb" }));
   app.use(express.urlencoded({ extended: true, limit: "100mb" }));
+  app.get("/healthz", (_req, res) => res.status(200).send({ status: "ok" }));
 
   // oss 静态资源
   const ossDir = u.getPath("oss");
@@ -217,9 +227,10 @@ export default async function startServe(randomPort: Boolean = false) {
     res.status(err.status || 500).send(err);
   });
 
-  const port = randomPort ? 0 : 10588;
+  const listen = resolveServerListenConfig();
+  const port = randomPort ? 0 : listen.port;
   return await new Promise((resolve) => {
-    server.listen(port, async () => {
+    server.listen(port, listen.host, async () => {
       const address = server.address();
       const realPort = typeof address === "string" ? address : address?.port;
       console.log(`[服务启动成功]: http://localhost:${realPort}`);

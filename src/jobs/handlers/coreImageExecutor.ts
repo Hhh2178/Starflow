@@ -44,7 +44,7 @@ export async function executeCoreImageGeneration(
     await image.save(imagePath);
     return {
       result: { imageId: payload.targetId, path: await getSmallImageUrl(imagePath) },
-      metering: { providerId: payload.model.split(/:(.+)/)[0] || null, modelId: payload.model, units: { images: 1 }, estimatedCost: null, currency: null, pricingSnapshot: {}, providerRequestId: null },
+      metering: { providerId: payload.model.split(/:(.+)/)[0] || null, modelId: payload.model, units: { requests: 1, images: 1 }, estimatedCost: null, currency: null, pricingSnapshot: {}, providerRequestId: null },
     };
   }
   const target = payload.operation === "asset"
@@ -93,7 +93,7 @@ export async function executeCoreImageGeneration(
       metering: {
         providerId: payload.model.split(/:(.+)/)[0] || null,
         modelId: payload.model,
-        units: { images: 1 },
+        units: { requests: 1, images: 1 },
         estimatedCost: null,
         currency: null,
         pricingSnapshot: {},

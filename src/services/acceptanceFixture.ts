@@ -1,4 +1,6 @@
 import type { Knex } from "knex";
+import { calculateReservedCost } from "@/services/modelPricing";
+import type { PricingSnapshot } from "@/types/generationQueue";
 import { hashPassword } from "@/utils/password";
 
 export interface AcceptanceFixtureResult {
@@ -23,7 +25,18 @@ export async function seedAcceptanceFixture(
   const passwordHash = hashPassword(password);
 
   return connection.transaction(async (trx) => {
+    const superAdmin = await trx("o_user").where({ role: "super_admin" }).orderBy("id").first();
+    if (!superAdmin) throw new Error("未找到 Super Admin 验收账号");
+    await trx("o_user").where({ id: superAdmin.id }).update({
+      password: null,
+      passwordHash,
+      status: "enabled",
+      mustChangePassword: true,
+      updatedAt: now,
+    });
+
     const acceptanceModels = [
+      { name: "本地验收文本", modelName: "acceptance-text", type: "text" },
       { name: "本地验收图片", modelName: "acceptance-image", type: "image", mode: ["text", "singleImage", "multiReference"] },
       { name: "本地验收视频", modelName: "acceptance-video", type: "video", mode: ["text", "singleImage"], audio: false, durationResolutionMap: [{ duration: [5], resolution: ["720p"] }] },
     ];
@@ -31,6 +44,73 @@ export async function seedAcceptanceFixture(
       .insert({ id: "null", inputValues: "{}", models: JSON.stringify(acceptanceModels), enable: 1 })
       .onConflict("id")
       .merge({ inputValues: "{}", models: JSON.stringify(acceptanceModels), enable: 1 });
+
+    const pricingSpecs = [
+      { modelId: "acceptance-image", taskType: "image", billingMode: "per_request", requestPrice: 0.06 },
+      { modelId: "acceptance-video", taskType: "video", billingMode: "per_second", secondPrice: 0.036 },
+      { modelId: "acceptance-text", taskType: "text", billingMode: "per_token", inputPricePerMillion: 1, outputPricePerMillion: 2, fallbackRequestPrice: 0.05 },
+    ] as const;
+    const pricingByModel = new Map<string, { id: number; snapshot: PricingSnapshot }>();
+    for (const pricing of pricingSpecs) {
+      await trx("o_modelPricing")
+        .where({ providerId: "null", modelId: pricing.modelId, status: "active" })
+        .whereNot({ version: 1 })
+        .update({ status: "superseded" });
+      const values = {
+        providerId: "null",
+        modelId: pricing.modelId,
+        taskType: pricing.taskType,
+        billingMode: pricing.billingMode,
+        requestPrice: "requestPrice" in pricing ? pricing.requestPrice : null,
+        secondPrice: "secondPrice" in pricing ? pricing.secondPrice : null,
+        inputPricePerMillion: "inputPricePerMillion" in pricing ? pricing.inputPricePerMillion : null,
+        outputPricePerMillion: "outputPricePerMillion" in pricing ? pricing.outputPricePerMillion : null,
+        fallbackRequestPrice: "fallbackRequestPrice" in pricing ? pricing.fallbackRequestPrice : null,
+        currency: "CNY",
+        version: 1,
+        status: "active",
+        effectiveAt: now,
+        createdBy: 1,
+        createdAt: now,
+      };
+      let row = await trx("o_modelPricing").where({ providerId: "null", modelId: pricing.modelId, version: 1 }).first();
+      if (!row) {
+        const [id] = await trx("o_modelPricing").insert(values);
+        row = await trx("o_modelPricing").where({ id }).first();
+      } else if (row.status !== "active") {
+        await trx("o_modelPricing").where({ id: row.id }).update({ status: "active" });
+        row = await trx("o_modelPricing").where({ id: row.id }).first();
+      }
+      pricingByModel.set(pricing.modelId, {
+        id: Number(row.id),
+        snapshot: {
+          pricingId: Number(row.id),
+          providerId: String(row.providerId),
+          modelId: String(row.modelId),
+          taskType: row.taskType,
+          billingMode: row.billingMode,
+          ...(row.requestPrice == null ? {} : { requestPrice: Number(row.requestPrice) }),
+          ...(row.secondPrice == null ? {} : { secondPrice: Number(row.secondPrice) }),
+          ...(row.inputPricePerMillion == null ? {} : { inputPricePerMillion: Number(row.inputPricePerMillion) }),
+          ...(row.outputPricePerMillion == null ? {} : { outputPricePerMillion: Number(row.outputPricePerMillion) }),
+          ...(row.fallbackRequestPrice == null ? {} : { fallbackRequestPrice: Number(row.fallbackRequestPrice) }),
+          currency: row.currency,
+          version: Number(row.version),
+          effectiveAt: Number(row.effectiveAt),
+        },
+      });
+    }
+
+    for (const key of ["universalAi", "scriptAgent", "productionAgent"]) {
+      const deployment = await trx("o_agentDeploy").where({ key }).orderBy("id").first();
+      if (!deployment) throw new Error(`未找到验收 Agent alias: ${key}`);
+      await trx("o_agentDeploy").where({ id: deployment.id }).update({
+        vendorId: "null",
+        model: "本地验收文本",
+        modelName: "acceptance-text",
+        disabled: false,
+      });
+    }
 
     const ensureUser = async (name: string, role: "admin" | "creator", groupId: number | null) => {
       let user = await trx("o_user").where({ name }).first();
@@ -182,11 +262,94 @@ export async function seedAcceptanceFixture(
       jobs.set(key, Number(job.id));
     }
 
+    const pricingJobSpecs = [
+      { key: "acceptance:pricing-request", groupId: groupA.id, ownerUserId: creatorA1.id, projectId: projectAId, taskType: "image", modelId: "acceptance-image", status: "succeeded", units: { requests: 1 } },
+      { key: "acceptance:pricing-second", groupId: groupB.id, ownerUserId: creatorB2.id, projectId: projectBId, taskType: "video", modelId: "acceptance-video", status: "needs_attention", units: { requests: 1, seconds: 5 } },
+      { key: "acceptance:pricing-token", groupId: groupA.id, ownerUserId: creatorA2.id, projectId: projectAId, taskType: "text", modelId: "acceptance-text", status: "failed", units: { requests: 1 } },
+    ] as const;
+    for (const spec of pricingJobSpecs) {
+      const pricing = pricingByModel.get(spec.modelId)!;
+      let job = await trx("o_generationJob").where({ idempotencyKey: spec.key }).first();
+      const existingReservation = job ? await trx("o_quotaReservation").where({ jobId: job.id }).first() : null;
+      const repairLegacyHandlerRelease = spec.key === "acceptance:pricing-second"
+        && job?.status === "needs_attention"
+        && job?.errorCode === "HANDLER_NOT_FOUND"
+        && job?.providerRequestId == null
+        && existingReservation?.status === "released"
+        && Number(existingReservation?.finalAmount) === 0
+        && existingReservation?.reason === "handler_not_found"
+        && existingReservation?.settledAt == null
+        && existingReservation?.releasedAt != null;
+      const externalStateUnknown = spec.status === "needs_attention";
+      const preserveAttentionHistory = externalStateUnknown && job?.status === "needs_attention";
+      const mutableValues = {
+        groupId: spec.groupId,
+        ownerUserId: spec.ownerUserId,
+        projectId: spec.projectId,
+        sourceTaskId: null,
+        handlerKey: "acceptance.fixture.pricing",
+        taskType: spec.taskType,
+        status: spec.status,
+        priority: 0,
+        payloadJson: JSON.stringify({ model: `null:${spec.modelId}`, billingUnits: spec.units }),
+        resultJson: spec.status === "succeeded" ? JSON.stringify({ fixture: true }) : null,
+        errorCode: externalStateUnknown ? "EXTERNAL_STATE_UNKNOWN" : spec.status === "failed" ? "ACCEPTANCE_PRICING_FAILURE" : null,
+        errorMessage: externalStateUnknown ? "Provider 外部状态未知，需要人工处理" : spec.status === "failed" ? "验收计价失败样本" : null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+        attemptCount: 1,
+        providerRequestId: externalStateUnknown ? "fixture:pricing-second:external-state" : null,
+        cancellationRequestedAt: null,
+        queuedAt: now - 6_000,
+        startedAt: preserveAttentionHistory ? job.startedAt : now - 5_000,
+        finishedAt: preserveAttentionHistory ? job.finishedAt : now - 4_000,
+      };
+      if (!job) {
+        const reservedAmount = calculateReservedCost(pricing.snapshot, spec.units);
+        const [id] = await trx("o_generationJob").insert({
+          idempotencyKey: spec.key,
+          ...mutableValues,
+          pricingSnapshotJson: JSON.stringify(pricing.snapshot),
+          reservedAmount,
+        });
+        job = await trx("o_generationJob").where({ id }).first();
+      } else {
+        await trx("o_generationJob").where({ id: job.id }).update(mutableValues);
+        job = await trx("o_generationJob").where({ id: job.id }).first();
+      }
+      const jobId = Number(job.id);
+      jobs.set(spec.key, jobId);
+      const storedPricingSnapshot = JSON.parse(String(job.pricingSnapshotJson)) as PricingSnapshot;
+      const reservationValues = {
+        groupId: spec.groupId,
+        pricingId: storedPricingSnapshot.pricingId,
+        reservedAmount: Number(job.reservedAmount),
+        finalAmount: spec.status === "succeeded" ? Number(job.reservedAmount) : spec.status === "failed" ? 0 : null,
+        status: spec.status === "succeeded" ? "settled" : spec.status === "failed" ? "released" : "reserved",
+        reason: spec.status === "succeeded" ? "succeeded" : spec.status === "failed" ? "failed" : null,
+        createdAt: now - 6_000,
+        settledAt: spec.status === "succeeded" ? now - 4_000 : null,
+        releasedAt: spec.status === "failed" ? now - 4_000 : null,
+      };
+      if (!existingReservation) {
+        await trx("o_quotaReservation").insert({ jobId, ...reservationValues });
+      } else if (repairLegacyHandlerRelease) {
+        await trx("o_quotaReservation").where({ id: existingReservation.id }).update({
+          finalAmount: null,
+          status: "reserved",
+          reason: null,
+          settledAt: null,
+          releasedAt: null,
+        });
+      }
+    }
+
     const usageSpecs = [
       { key: "acceptance:a-succeeded", groupId: groupA.id, userId: creatorA1.id, projectId: projectAId, providerId: "fixture-provider", modelId: "acceptance-text", taskType: "text", estimatedCost: 1.25 },
       { key: "acceptance:b-succeeded", groupId: groupB.id, userId: creatorB1.id, projectId: projectBId, providerId: "fixture-provider", modelId: "acceptance-image", taskType: "image", estimatedCost: 2.5 },
     ];
-    const fixtureUsage = new Map<number, { id: number; key: string; estimatedCost: number }>();
+    const fixtureUsage = new Map<number, Array<{ id: number; key: string; estimatedCost: number }>>();
     for (const usage of usageSpecs) {
       const jobId = Number(jobs.get(usage.key));
       const values = { jobId, groupId: usage.groupId, userId: usage.userId, projectId: usage.projectId, providerId: usage.providerId, modelId: usage.modelId, taskType: usage.taskType, unitJson: "{}", estimatedCost: usage.estimatedCost, currency: "CNY", pricingSnapshotJson: JSON.stringify({ fixture: true }), result: "succeeded", createdAt: now - 7_000 };
@@ -199,20 +362,44 @@ export async function seedAcceptanceFixture(
         const [id] = await trx("o_usageLedger").insert(values);
         usageId = Number(id);
       }
-      fixtureUsage.set(usage.groupId, { id: usageId, key: usage.key, estimatedCost: usage.estimatedCost });
+      const groupUsage = fixtureUsage.get(usage.groupId) ?? [];
+      groupUsage.push({ id: usageId, key: usage.key, estimatedCost: usage.estimatedCost });
+      fixtureUsage.set(usage.groupId, groupUsage);
     }
 
+    const pricedJob = pricingJobSpecs[0];
+    const pricedJobId = Number(jobs.get(pricedJob.key));
+    const storedPricedJob = await trx("o_generationJob").where({ id: pricedJobId }).first();
+    const pricedUsageValues = { jobId: pricedJobId, groupId: pricedJob.groupId, userId: pricedJob.ownerUserId, projectId: pricedJob.projectId, providerId: "null", modelId: pricedJob.modelId, taskType: pricedJob.taskType, unitJson: JSON.stringify(pricedJob.units), estimatedCost: Number(storedPricedJob.reservedAmount), currency: "CNY", pricingSnapshotJson: String(storedPricedJob.pricingSnapshotJson), result: "succeeded", createdAt: now - 3_000 };
+    let pricedUsage = await trx("o_usageLedger").where({ jobId: pricedJobId }).first();
+    if (!pricedUsage) {
+      const [id] = await trx("o_usageLedger").insert(pricedUsageValues);
+      pricedUsage = await trx("o_usageLedger").where({ id }).first();
+    }
+    const groupAPricedUsage = fixtureUsage.get(groupA.id) ?? [];
+    groupAPricedUsage.push({ id: Number(pricedUsage.id), key: pricedJob.key, estimatedCost: Number(pricedUsage.estimatedCost) });
+    fixtureUsage.set(groupA.id, groupAPricedUsage);
+
     for (const group of [groupA, groupB]) {
-      const usage = fixtureUsage.get(group.id);
-      const balanceAfter = 500 - (usage?.estimatedCost ?? 0);
-      await trx("o_quotaAccount").insert({ groupId: group.id, balance: balanceAfter, updatedAt: now }).onConflict("groupId").merge({ balance: balanceAfter, updatedAt: now });
+      const usageRows = fixtureUsage.get(group.id) ?? [];
+      const totalUsage = usageRows.reduce((sum, usage) => sum + usage.estimatedCost, 0);
+      const balanceAfter = 500 - totalUsage;
+      const reservedRow = await trx("o_quotaReservation")
+        .where({ groupId: group.id, status: "reserved" })
+        .sum({ reservedBalance: "reservedAmount" })
+        .first();
+      const reservedBalance = Number(reservedRow?.reservedBalance ?? 0);
+      await trx("o_quotaAccount").insert({ groupId: group.id, balance: balanceAfter, reservedBalance, billingStatus: "active", updatedAt: now }).onConflict("groupId").merge({ balance: balanceAfter, reservedBalance, billingStatus: "active", updatedAt: now });
       const existing = await trx("o_quotaLedger").where({ groupId: group.id, reason: "本地验收 fixture 初始额度" }).first();
       if (!existing) await trx("o_quotaLedger").insert({ groupId: group.id, entryType: "manual_topup", amount: 500, balanceBefore: 0, balanceAfter: 500, actorUserId: 1, usageLedgerId: null, reason: "本地验收 fixture 初始额度", createdAt: now });
-      if (usage) {
-        const values = { groupId: group.id, entryType: "usage_debit", amount: -usage.estimatedCost, balanceBefore: 500, balanceAfter, actorUserId: null, usageLedgerId: usage.id, reason: `本地验收 fixture 用量扣款:${usage.key}`, createdAt: now + 1 };
+      let balanceBefore = 500;
+      for (const usage of usageRows) {
+        const usageBalanceAfter = balanceBefore - usage.estimatedCost;
+        const values = { groupId: group.id, entryType: "usage_debit", amount: -usage.estimatedCost, balanceBefore, balanceAfter: usageBalanceAfter, actorUserId: null, usageLedgerId: usage.id, reason: `本地验收 fixture 用量扣款:${usage.key}`, createdAt: now + 1 };
         const existingDebit = await trx("o_quotaLedger").where({ usageLedgerId: usage.id, entryType: "usage_debit" }).first();
         if (existingDebit) await trx("o_quotaLedger").where({ id: existingDebit.id }).update(values);
         else await trx("o_quotaLedger").insert(values);
+        balanceBefore = usageBalanceAfter;
       }
     }
 

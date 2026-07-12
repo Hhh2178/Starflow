@@ -365,7 +365,7 @@ export async function executeQueuedAgent(
     metering: {
       providerId: null,
       modelId: payload.model,
-      units: {},
+      units: { requests: 1 },
       estimatedCost: null,
       currency: null,
       pricingSnapshot: {},

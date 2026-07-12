@@ -4,6 +4,7 @@ import type { CapacityUsage, ConcurrencyLimit, GenerationExecutionContext, Gener
 import type { GenerationJobRecord } from "@/services/generationQueue";
 import type { GenerationJobRegistry } from "@/jobs/registry";
 import { completeGenerationUsage } from "@/services/generationUsage";
+import { releaseQuotaReservation } from "@/services/quotaReservation";
 
 type SchedulerConnection = Knex | Knex.Transaction;
 
@@ -242,27 +243,33 @@ export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJo
   if (!job) throw new Error("运行中的生成任务不存在");
   const handler = options.registry.get(String(job.handlerKey));
   if (!handler || handler.taskType !== job.taskType) {
-    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: "needs_attention",
-      errorCode: "HANDLER_NOT_FOUND",
-      errorMessage: "找不到可信的任务处理器",
-      finishedAt: now(),
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      heartbeatAt: null,
+    await inTransaction(connection, async (trx) => {
+      await trx("o_generationJob").where({ id: jobId, status: "running" }).update({
+        status: "needs_attention",
+        errorCode: "HANDLER_NOT_FOUND",
+        errorMessage: "找不到可信的任务处理器",
+        finishedAt: now(),
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+      });
+      await releaseQuotaReservation(trx, jobId, "handler_not_found");
     });
     return;
   }
 
   if (job.cancellationRequestedAt != null) {
-    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: "cancelled",
-      finishedAt: now(),
-      errorCode: null,
-      errorMessage: null,
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      heartbeatAt: null,
+    await inTransaction(connection, async (trx) => {
+      await trx("o_generationJob").where({ id: jobId, status: "running" }).update({
+        status: "cancelled",
+        finishedAt: now(),
+        errorCode: null,
+        errorMessage: null,
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+      });
+      await releaseQuotaReservation(trx, jobId, "running_cancelled_before_execution");
     });
     return;
   }
@@ -317,14 +324,22 @@ export async function executeClaimedJob(jobId: number, options: ExecuteClaimedJo
     await completeGenerationUsage(jobId, execution.result, execution.metering, connection, now());
   } catch (error) {
     const cancelled = controller.signal.aborted || (error instanceof Error && error.name === "AbortError");
-    await connection("o_generationJob").where({ id: jobId, status: "running" }).update({
-      status: cancelled ? "cancelled" : providerCompleted ? "needs_attention" : "failed",
-      errorCode: cancelled ? null : providerCompleted ? "ACCOUNTING_FAILED" : "HANDLER_EXECUTION_FAILED",
-      errorMessage: cancelled ? null : (error instanceof Error ? error.message : String(error)).slice(0, 500),
-      finishedAt: now(),
-      leaseOwner: null,
-      leaseExpiresAt: null,
-      heartbeatAt: null,
+    await inTransaction(connection, async (trx) => {
+      const latest = await trx("o_generationJob").where({ id: jobId, status: "running" }).first();
+      const providerStateUnknown = !cancelled && !providerCompleted && latest?.providerRequestId != null;
+      const needsAttention = providerCompleted || providerStateUnknown;
+      await trx("o_generationJob").where({ id: jobId, status: "running" }).update({
+        status: cancelled ? "cancelled" : needsAttention ? "needs_attention" : "failed",
+        errorCode: cancelled ? null : providerCompleted ? "ACCOUNTING_FAILED" : providerStateUnknown ? "EXTERNAL_STATE_UNKNOWN" : "HANDLER_EXECUTION_FAILED",
+        errorMessage: cancelled ? null : (error instanceof Error ? error.message : String(error)).slice(0, 500),
+        finishedAt: now(),
+        leaseOwner: null,
+        leaseExpiresAt: null,
+        heartbeatAt: null,
+      });
+      if (cancelled || !needsAttention) {
+        await releaseQuotaReservation(trx, jobId, cancelled ? "running_cancelled" : "handler_execution_failed");
+      }
     });
   } finally {
     if (timer) clearInterval(timer);

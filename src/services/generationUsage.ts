@@ -1,6 +1,8 @@
 import type { Knex } from "knex";
 import type { MeteringResult } from "@/types/generationQueue";
 import { fromMoneyMicros, normalizeMoney, toMoneyMicros } from "@/lib/money";
+import { calculateActualCost, type PricingSnapshot } from "@/services/modelPricing";
+import { settleQuotaReservation } from "@/services/quotaReservation";
 
 type UsageConnection = Knex | Knex.Transaction;
 
@@ -31,6 +33,12 @@ function toUsageRecord(row: any): UsageLedgerRecord {
   };
 }
 
+function parseJobPricingSnapshot(value: unknown): PricingSnapshot | null {
+  if (value == null) return null;
+  const parsed = JSON.parse(String(value)) as PricingSnapshot;
+  return parsed && typeof parsed === "object" && Object.keys(parsed).length > 0 ? parsed : null;
+}
+
 export async function completeGenerationUsage(
   jobId: number,
   result: unknown,
@@ -45,6 +53,11 @@ export async function completeGenerationUsage(
 
     const job = await trx("o_generationJob").where({ id: jobId }).first();
     if (!job) throw new Error("生成任务不存在");
+    const reservation = await trx("o_quotaReservation").where({ jobId }).first();
+    const pricingSnapshot = parseJobPricingSnapshot(job.pricingSnapshotJson);
+    if (pricingSnapshot && !reservation) {
+      throw new Error("计费任务预占记录不存在");
+    }
     await trx("o_generationJob").where({ id: jobId }).update({
       status: "succeeded",
       resultJson: JSON.stringify(result),
@@ -54,27 +67,36 @@ export async function completeGenerationUsage(
       leaseExpiresAt: null,
       heartbeatAt: null,
     });
-    const normalizedCost = metering.estimatedCost == null || !Number.isFinite(metering.estimatedCost)
-      ? null
-      : normalizeMoney(metering.estimatedCost);
+    const normalizedCost = pricingSnapshot
+      ? calculateActualCost(pricingSnapshot, metering.units)
+      : metering.estimatedCost == null || !Number.isFinite(metering.estimatedCost)
+        ? null
+        : normalizeMoney(metering.estimatedCost);
     const [usageId] = await trx("o_usageLedger").insert({
       jobId,
       groupId: Number(job.groupId),
       userId: Number(job.ownerUserId),
       projectId: job.projectId == null ? null : Number(job.projectId),
-      providerId: metering.providerId,
-      modelId: metering.modelId,
+      providerId: pricingSnapshot?.providerId ?? metering.providerId,
+      modelId: pricingSnapshot?.modelId ?? metering.modelId,
       taskType: String(job.taskType),
       unitJson: JSON.stringify(metering.units),
       estimatedCost: normalizedCost,
-      currency: metering.currency,
-      pricingSnapshotJson: JSON.stringify(metering.pricingSnapshot),
+      currency: pricingSnapshot?.currency ?? metering.currency,
+      pricingSnapshotJson: pricingSnapshot ? String(job.pricingSnapshotJson) : JSON.stringify(metering.pricingSnapshot),
       result: "succeeded",
       createdAt: completedAt,
     });
 
     const cost = normalizedCost;
-    if (cost !== null && cost > 0) {
+    if (pricingSnapshot && cost !== null) {
+      await settleQuotaReservation(trx, {
+        jobId,
+        usageLedgerId: Number(usageId),
+        finalAmount: cost,
+        completedAt,
+      });
+    } else if (cost !== null && cost > 0) {
       let account = await trx("o_quotaAccount").where({ groupId: job.groupId }).first();
       if (!account) {
         await trx("o_quotaAccount").insert({ groupId: job.groupId, balance: 0, updatedAt: completedAt });

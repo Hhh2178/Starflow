@@ -1,6 +1,7 @@
 import type { Knex } from "knex";
 import { normalizeMoney } from "@/lib/money";
 import type { AuthUser } from "@/types/auth";
+import type { BillingMode, BillingUnits, PricingSnapshot } from "@/types/generationQueue";
 
 type MonitoringConnection = Knex | Knex.Transaction;
 
@@ -43,6 +44,7 @@ export interface AdminUsageListItem {
   id: number; jobId: number; groupId: number; groupName: string; userId: number; userName: string;
   projectId: number | null; projectName: string | null; providerId: string | null; modelId: string | null;
   taskType: string; estimatedCost: number | null; currency: string | null; result: string; createdAt: number;
+  units: BillingUnits; pricingSnapshot: PricingSnapshot | null; billingMode: BillingMode | null; finalCost: number | null;
 }
 
 export interface AdminUsageOverview extends AdminPagedResult<AdminUsageListItem> {
@@ -96,6 +98,57 @@ function assertOptionalId(value: number | undefined, code: string, label: string
   if (value !== undefined && (!Number.isInteger(value) || value <= 0)) {
     throw new AdminMonitoringError(422, code, `${label}必须是正整数`);
   }
+}
+
+function parseObject(value: unknown): Record<string, unknown> | null {
+  if (typeof value !== "string") return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isSnapshotPrice(value: unknown): value is number {
+  return typeof value === "number"
+    && Number.isFinite(value)
+    && value >= 0
+    && Math.abs(value * 1_000_000 - Math.round(value * 1_000_000)) < 1e-7;
+}
+
+function isPricingSnapshot(value: Record<string, unknown> | null): value is Record<string, unknown> & PricingSnapshot {
+  if (!value
+    || !Number.isInteger(value.pricingId)
+    || typeof value.providerId !== "string"
+    || typeof value.modelId !== "string"
+    || !["text", "image", "video"].includes(String(value.taskType))
+    || !["per_request", "per_second", "per_token"].includes(String(value.billingMode))
+    || value.currency !== "CNY"
+    || !Number.isInteger(value.version)
+    || typeof value.effectiveAt !== "number"
+    || !Number.isFinite(value.effectiveAt)) {
+    return false;
+  }
+  if (value.billingMode === "per_request") {
+    return isSnapshotPrice(value.requestPrice)
+      && value.secondPrice === undefined
+      && value.inputPricePerMillion === undefined
+      && value.outputPricePerMillion === undefined
+      && value.fallbackRequestPrice === undefined;
+  }
+  if (value.billingMode === "per_second") {
+    return value.requestPrice === undefined
+      && isSnapshotPrice(value.secondPrice)
+      && value.inputPricePerMillion === undefined
+      && value.outputPricePerMillion === undefined
+      && value.fallbackRequestPrice === undefined;
+  }
+  return value.requestPrice === undefined
+    && value.secondPrice === undefined
+    && isSnapshotPrice(value.inputPricePerMillion)
+    && isSnapshotPrice(value.outputPricePerMillion)
+    && isSnapshotPrice(value.fallbackRequestPrice);
 }
 
 export async function listAdminProjects(
@@ -287,6 +340,8 @@ export async function getUsageOverview(
       "o_usageLedger.taskType",
       "o_usageLedger.estimatedCost",
       "o_usageLedger.currency",
+      "o_usageLedger.unitJson",
+      "o_usageLedger.pricingSnapshotJson",
       "o_usageLedger.result",
       "o_usageLedger.createdAt",
     )
@@ -308,7 +363,13 @@ export async function getUsageOverview(
     page,
     pageSize,
     total: Number(summaryRow?.recordCount ?? 0),
-    items: rows.map((row: any): AdminUsageListItem => ({
+    items: rows.map((row: any): AdminUsageListItem => {
+      const units = parseObject(row.unitJson) ?? {};
+      const parsedSnapshot = parseObject(row.pricingSnapshotJson);
+      const snapshot = isPricingSnapshot(parsedSnapshot) ? parsedSnapshot : null;
+      const billingMode = snapshot?.billingMode ?? null;
+      const finalCost = row.estimatedCost == null ? null : normalizeMoney(Number(row.estimatedCost));
+      return {
       id: Number(row.id),
       jobId: Number(row.jobId),
       groupId: Number(row.groupId),
@@ -320,10 +381,15 @@ export async function getUsageOverview(
       providerId: row.providerId == null ? null : String(row.providerId),
       modelId: row.modelId == null ? null : String(row.modelId),
       taskType: String(row.taskType),
-      estimatedCost: row.estimatedCost == null ? null : normalizeMoney(Number(row.estimatedCost)),
+      estimatedCost: finalCost,
       currency: row.currency == null ? null : String(row.currency),
       result: String(row.result),
       createdAt: Number(row.createdAt),
-    })),
+      units: units as BillingUnits,
+      pricingSnapshot: snapshot,
+      billingMode,
+      finalCost,
+    };
+    }),
   };
 }

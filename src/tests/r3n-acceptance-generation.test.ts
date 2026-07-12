@@ -36,6 +36,12 @@ async function main() {
     });
     const text = registry.get("core.text")!;
 
+    await db("o_novel").insert({ id: 501, projectId: 301, chapterIndex: 1, chapterData: "acceptance", eventState: 0 });
+    const textResult = await text.execute(context(new AbortController().signal), text.parsePayload({
+      operation: "novel_events", projectId: 301, targetId: 501, model: "universalAi", prompt: "",
+    }));
+    assert.deepEqual(textResult.metering.units, { requests: 1 });
+
     const startedAt = Date.now();
     const success = await text.execute(context(new AbortController().signal), text.parsePayload({
       operation: "script_agent", projectId: 301, targetId: 301, model: "universalAi",
@@ -72,15 +78,17 @@ async function main() {
     const storedImage = await db("o_image").where({ id: 601 }).first();
     assert.equal(storedImage.state, "已完成");
     assert.equal((imageResult.result as any).path, "/oss/acceptance/301-601.png");
+    assert.deepEqual(imageResult.metering.units, { requests: 1, images: 1 });
     await fs.access(path.resolve("data", "oss", "acceptance", "301-601.png"));
 
     await db("o_video").insert({ id: 701, projectId: 301, scriptId: 1, videoTrackId: 1, filePath: "/301/video/701.mp4", state: "生成中" });
     const video = registry.get("core.video")!;
-    await video.execute(context(new AbortController().signal), video.parsePayload({
+    const videoResult = await video.execute(context(new AbortController().signal), video.parsePayload({
       operation: "track", projectId: 301, targetId: 701, model: "null:acceptance-video",
       prompt: "本地视频", referenceResourceIds: [], referenceResources: [], duration: 5,
       resolution: "720p", aspectRatio: "16:9", audio: false, mode: "text",
     }));
+    assert.deepEqual(videoResult.metering.units, { requests: 1, seconds: 5 });
     assert.equal((await db("o_video").where({ id: 701 }).first()).state, "已完成");
   } finally {
     await db.destroy();

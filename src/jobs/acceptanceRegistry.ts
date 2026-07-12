@@ -14,11 +14,16 @@ export interface AcceptanceGenerationOptions {
   delayMs?: number;
 }
 
-function metering(model: string, type: "text" | "image" | "video"): MeteringResult {
+function metering(model: string, type: "text" | "image" | "video", seconds = 0): MeteringResult {
+  const units = type === "video"
+    ? { requests: 1, seconds }
+    : type === "image"
+      ? { requests: 1, images: 1 }
+      : { requests: 1 };
   return {
     providerId: "acceptance",
     modelId: model,
-    units: { [type]: 1 },
+    units,
     estimatedCost: 0,
     currency: "CNY",
     pricingSnapshot: { source: "local-acceptance" },
@@ -125,7 +130,7 @@ async function executeAcceptanceVideo(
   await waitForAcceptance(context, delayMs, payload.prompt);
   await connection("o_video").where({ id: payload.targetId, projectId: payload.projectId }).update({ state: "已完成", errorReason: null });
   const video = await connection("o_video").where({ id: payload.targetId, projectId: payload.projectId }).select("filePath").first();
-  return { result: { videoId: payload.targetId, path: video?.filePath ?? null }, metering: metering(payload.model, "video") };
+  return { result: { videoId: payload.targetId, path: video?.filePath ?? null }, metering: metering(payload.model, "video", payload.duration) };
 }
 
 export function createAcceptanceGenerationRegistry(options: AcceptanceGenerationOptions) {

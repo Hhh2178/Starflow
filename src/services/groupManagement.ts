@@ -91,6 +91,10 @@ async function nextUserId(trx: any): Promise<number> {
   return Number(row?.maxId ?? 0) + 1;
 }
 
+async function createQuotaAccount(trx: any, groupId: number, now: number): Promise<void> {
+  await trx("o_quotaAccount").insert({ groupId, balance: 0, updatedAt: now });
+}
+
 export async function listGroups(actor: AuthUser): Promise<GroupDto[]> {
   requireSuperAdmin(actor);
   const groups = await u.db("o_group").select("*").orderBy("id", "asc");
@@ -114,6 +118,7 @@ export async function createGroup(actor: AuthUser, input: CreateGroupInput): Pro
       createdAt: now,
       updatedAt: now,
     });
+    await createQuotaAccount(trx, Number(id), now);
     await trx("o_user").where("id", input.adminUserId).update({ groupId: id, updatedAt: now });
     await writeAudit({
       actor,
@@ -155,6 +160,7 @@ export async function updateGroup(actor: AuthUser, input: UpdateGroupInput): Pro
           createdAt: now,
           updatedAt: now,
         });
+        await createQuotaAccount(trx, Number(replacementGroupId), now);
         await trx("o_user").where("id", previousAdminId).update({ groupId: replacementGroupId, updatedAt: now });
       }
       await trx("o_user").where("id", input.adminUserId).update({ groupId: input.id, updatedAt: now });
@@ -241,6 +247,7 @@ export async function createScopedUser(actor: AuthUser, input: CreateUserInput):
         updatedAt: now,
       });
       groupId = Number(createdGroupId);
+      await createQuotaAccount(trx, groupId, now);
       await trx("o_user").where("id", id).update({ groupId });
     }
 

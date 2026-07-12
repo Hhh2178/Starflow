@@ -19,6 +19,13 @@ export interface UpdateProviderInput {
   inputValues?: Record<string, string>;
 }
 
+export interface TestProviderConnectionInput {
+  id: string;
+  modelName: string;
+}
+
+type ConnectionFetcher = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
 export interface UpdateAiDeploymentInput {
   id: number;
   vendorId: string | null;
@@ -96,12 +103,13 @@ export async function getProviderOverview(
     const configured = definition !== null && requiredInputs.every((input) => {
       return isConfigured(input.key);
     });
-    const byId = new Map<string, { name: string; type: string }>();
+    const byId = new Map<string, { name: string; modelName: string; type: string }>();
     for (const model of [...(definition?.models ?? []), ...parseModels(row.models)]) {
       const name = String(model.name ?? model.modelName ?? "").trim();
       const type = String(model.type ?? "unknown").trim() || "unknown";
       if (!name) continue;
-      byId.set(String(model.modelName ?? name), { name, type });
+      const modelName = String(model.modelName ?? name);
+      byId.set(modelName, { name, modelName, type });
     }
     const models = [...byId.values()];
     const counts = new Map<string, number>();
@@ -127,6 +135,83 @@ export async function getProviderOverview(
     capabilities: { read: true, update: actor.role === "super_admin" },
     providers,
   };
+}
+
+export async function testProviderConnection(
+  actor: AuthUser,
+  input: TestProviderConnectionInput,
+  connection: SettingsConnection = db,
+  resolveVendor: (id: string) => VendorDefinition | null = defaultResolveVendor,
+  fetcher: ConnectionFetcher = fetch,
+) {
+  requireSuperAdmin(actor);
+  const row = await connection("o_vendorConfig").where({ id: input.id }).first();
+  if (!row) throw new AdminSettingsError(404, "PROVIDER_NOT_FOUND", "Provider 不存在");
+  const definition = resolveVendor(input.id);
+  if (!definition) throw new AdminSettingsError(422, "PROVIDER_DEFINITION_MISSING", "Provider 适配器不存在");
+  const models = [...(definition.models ?? []), ...parseModels(row.models)];
+  if (!models.some((model) => String(model.modelName ?? "") === input.modelName)) {
+    throw new AdminSettingsError(404, "PROVIDER_MODEL_NOT_FOUND", "Provider 模型不存在");
+  }
+  const values = { ...(definition.inputValues ?? {}), ...parseObject(row.inputValues) };
+  const apiKey = String(values.apiKey ?? "").replace(/^Bearer\s+/i, "").trim();
+  const baseUrl = String(values.baseUrl ?? "").replace(/\/+$/, "").trim();
+  if (!apiKey || !baseUrl) throw new AdminSettingsError(422, "PROVIDER_NOT_CONFIGURED", "Provider 凭据尚未配置完整");
+
+  const startedAt = Date.now();
+  let response: Response;
+  if (input.id === "grsai") {
+    response = await fetcher(`${baseUrl}/v1/draw/result`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "stars-flow-connection-check" }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } else {
+    const modelsUrl = baseUrl.endsWith("/v1") ? `${baseUrl}/models` : `${baseUrl}/v1/models`;
+    response = await fetcher(modelsUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: AbortSignal.timeout(15000),
+    });
+  }
+
+  const responseText = await response.text();
+  let responseData: any;
+  try {
+    responseData = JSON.parse(responseText);
+  } catch {
+    throw new AdminSettingsError(502, "PROVIDER_NON_JSON_RESPONSE", "Provider 返回了非 JSON 响应，请检查 API 地址");
+  }
+  if (!response.ok && !(input.id === "grsai" && ![401, 403].includes(response.status))) {
+    throw new AdminSettingsError(502, "PROVIDER_CONNECTION_FAILED", `Provider 连接失败（HTTP ${response.status}）`);
+  }
+
+  let modelAvailable = true;
+  if (input.id !== "grsai" && Array.isArray(responseData?.data)) {
+    const upstreamModels = responseData.data.map((item: any) => String(item?.id ?? item?.name ?? "")).filter(Boolean);
+    modelAvailable = upstreamModels.includes(input.modelName);
+    if (!modelAvailable) throw new AdminSettingsError(422, "PROVIDER_MODEL_UNAVAILABLE", "上游模型目录中未找到该模型");
+  }
+  const checkedAt = Date.now();
+  const result = {
+    providerId: input.id,
+    modelName: input.modelName,
+    status: "available" as const,
+    modelAvailable,
+    latencyMs: checkedAt - startedAt,
+    checkedAt,
+  };
+  await writeAudit({
+    actor,
+    groupId: null,
+    action: "admin.provider.connection_test",
+    targetType: "provider_model",
+    targetId: `${input.id}:${input.modelName}`,
+    summary: { providerId: input.id, modelName: input.modelName, latencyMs: result.latencyMs },
+    result: "success",
+  }, connection as Knex);
+  return result;
 }
 
 export async function updateProvider(

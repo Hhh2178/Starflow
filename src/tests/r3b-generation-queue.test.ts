@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { unlink } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import express from "express";
 import knex from "knex";
 import initDB from "@/lib/initDB";
@@ -23,6 +27,7 @@ import {
 } from "@/services/generationQueue";
 import { chooseFairCandidate, claimNextJob } from "@/services/generationScheduler";
 import { executeClaimedJob, recoverExpiredJobs } from "@/services/generationScheduler";
+import { startGenerationScheduler } from "@/services/generationSchedulerRuntime";
 import { createGenerationJobRegistry } from "@/jobs/registry";
 import { coreGenerationRegistry, createCoreGenerationRegistry } from "@/jobs/coreRegistry";
 import type { GenerationExecutionContext, GenerationJobHandler } from "@/types/generationQueue";
@@ -32,6 +37,7 @@ import { createImageGenerationHandler } from "@/jobs/handlers/imageGeneration";
 import { createVideoGenerationHandler } from "@/jobs/handlers/videoGeneration";
 import {
   enqueueAssetImageJob,
+  addNovelAndEnqueueEventJobs,
   enqueueNovelEventJobs,
   enqueueStoryboardImageJobs,
   enqueueVideoJobs,
@@ -117,6 +123,100 @@ async function testFreshGenerationQueueOrderingIndex(): Promise<void> {
     });
   } finally {
     await freshDb.destroy();
+  }
+}
+
+async function testBatchEnqueueSettlesEveryPricedJob(): Promise<void> {
+  const filename = path.join(tmpdir(), `stars-flow-batch-billing-${randomUUID()}.sqlite`);
+  const producerDb = knex({ client: "better-sqlite3", connection: { filename }, useNullAsDefault: true });
+  let schedulerDb: ReturnType<typeof knex> | null = null;
+  let stopScheduler: (() => Promise<void>) | null = null;
+  try {
+    await initDB(producerDb, false, false);
+    const now = Date.now();
+    await producerDb("o_group").insert({ id: 901, name: "batch-billing", creatorLimit: 2, status: "enabled", createdAt: now, updatedAt: now });
+    await producerDb("o_user").insert({ id: 901, name: "batch-user", role: "creator", status: "enabled", groupId: 901 });
+    await migrateGenerationQueue(producerDb);
+    await producerDb("o_project").insert({ id: 901, name: "batch-project", userId: 901, ownerUserId: 901, groupId: 901 });
+    await producerDb("o_agentDeploy").insert({
+      id: 901,
+      key: "universalAi",
+      name: "batch-text-model",
+      vendorId: "test",
+      modelName: "batch-text-model",
+      disabled: false,
+    });
+    await producerDb("o_modelPricing").insert({
+      providerId: "test",
+      modelId: "batch-text-model",
+      taskType: "text",
+      billingMode: "per_request",
+      requestPrice: 0.05,
+      currency: "CNY",
+      version: 1,
+      status: "active",
+      effectiveAt: now,
+      createdBy: 901,
+      createdAt: now,
+    });
+    await producerDb("o_quotaAccount").where({ groupId: 901 }).update({ balance: 10, reservedBalance: 0 });
+
+    schedulerDb = knex({ client: "better-sqlite3", connection: { filename }, useNullAsDefault: true });
+    const registry = createGenerationJobRegistry([{
+      key: "core.text",
+      taskType: "text",
+      canRetryAfterProviderSubmission: false,
+      parsePayload: (value: unknown) => value,
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        return {
+          result: { ok: true },
+          metering: {
+            providerId: "acceptance",
+            modelId: "universalAi",
+            units: { requests: 1 },
+            estimatedCost: 0,
+            currency: "CNY",
+            pricingSnapshot: { source: "local-acceptance" },
+            providerRequestId: null,
+          },
+        };
+      },
+    }]);
+    stopScheduler = await startGenerationScheduler({ connection: schedulerDb, registry, intervalMs: 1 });
+
+    const actor: AuthUser = { id: 901, name: "batch-user", role: "creator", groupId: 901 };
+    const batch = await producerDb.transaction((trx) => addNovelAndEnqueueEventJobs(actor, {
+      projectId: 901,
+      data: [
+        { index: 1, reel: "1", chapter: "one", chapterData: "first" },
+        { index: 2, reel: "1", chapter: "two", chapterData: "second" },
+      ],
+    }, `batch-${randomUUID()}`, trx));
+
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      const succeeded = await producerDb("o_generationJob").whereIn("id", batch.items.map((item) => item.jobId)).where({ status: "succeeded" });
+      if (succeeded.length === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
+    const jobs = await producerDb("o_generationJob").whereIn("id", batch.items.map((item) => item.jobId)).orderBy("id");
+    const usages = await producerDb("o_usageLedger").whereIn("jobId", batch.items.map((item) => item.jobId)).orderBy("jobId");
+    const reservations = await producerDb("o_quotaReservation").whereIn("jobId", batch.items.map((item) => item.jobId)).orderBy("jobId");
+    const account = await producerDb("o_quotaAccount").where({ groupId: 901 }).first();
+    assert.deepEqual(jobs.map((row) => row.status), ["succeeded", "succeeded"]);
+    assert.deepEqual(usages.map((row) => Number(row.estimatedCost)), [0.05, 0.05]);
+    assert.deepEqual(reservations.map((row) => row.status), ["settled", "settled"]);
+    assert.deepEqual(reservations.map((row) => Number(row.finalAmount)), [0.05, 0.05]);
+    assert.equal(Number(account.reservedBalance), 0);
+  } finally {
+    if (stopScheduler) await stopScheduler();
+    if (schedulerDb) await schedulerDb.destroy();
+    await producerDb.destroy();
+    await unlink(filename).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
   }
 }
 
@@ -1224,7 +1324,7 @@ async function testCoreVideoPromptExecutor(db: ReturnType<typeof knex>): Promise
     metering: {
       providerId: null,
       modelId: "universalAi",
-      units: {},
+      units: { requests: 1 },
       estimatedCost: null,
       currency: null,
       pricingSnapshot: {},
@@ -1920,6 +2020,52 @@ async function testUsageAndQuotaLedger(db: ReturnType<typeof knex>): Promise<voi
   assert.equal(adminQuotaOverview.logs.every((log) => log.groupId === 101), true);
 }
 
+async function testPricedUsageRequiresItsReservation(db: ReturnType<typeof knex>): Promise<void> {
+  await db("o_generationJob").del();
+  await db("o_usageLedger").del();
+  const pricingSnapshot = {
+    pricingId: 999,
+    providerId: "test",
+    modelId: "text-model",
+    taskType: "text",
+    billingMode: "per_request",
+    requestPrice: 0.05,
+    currency: "CNY",
+    version: 1,
+    effectiveAt: 1,
+  };
+  const [jobId] = await db("o_generationJob").insert({
+    groupId: 101,
+    ownerUserId: 3,
+    projectId: 1001,
+    handlerKey: "test.usage.priced",
+    taskType: "text",
+    status: "running",
+    priority: 0,
+    payloadJson: "{}",
+    idempotencyKey: "usage-priced-without-reservation",
+    pricingSnapshotJson: JSON.stringify(pricingSnapshot),
+    reservedAmount: 0.05,
+    queuedAt: 1,
+    attemptCount: 1,
+  });
+
+  await assert.rejects(
+    completeGenerationUsage(Number(jobId), { ok: true }, {
+      providerId: "acceptance",
+      modelId: "universalAi",
+      units: { requests: 1 },
+      estimatedCost: 0,
+      currency: "CNY",
+      pricingSnapshot: { source: "local-acceptance" },
+      providerRequestId: null,
+    }, db, 600),
+    /预占记录不存在/,
+  );
+  assert.equal((await db("o_generationJob").where({ id: jobId }).first()).status, "running");
+  assert.equal(await db("o_usageLedger").where({ jobId }).first(), undefined);
+}
+
 async function testUsageMicroUnitArithmetic(db: ReturnType<typeof knex>): Promise<void> {
   await db("o_generationJob").del();
   await db("o_usageLedger").del();
@@ -1983,6 +2129,7 @@ async function main(): Promise<void> {
   await testCoreRegistryForwardsExecutionContext();
   await testVideoPromptRouteHandlers();
   await testVideoPromptHttpRoutes();
+  await testBatchEnqueueSettlesEveryPricedJob();
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
     await initDB(db, false, false);
@@ -2023,6 +2170,33 @@ async function main(): Promise<void> {
     ]);
 
     await migrateGenerationQueue(db);
+    await db("o_agentDeploy").insert({
+      id: 1,
+      key: "universalAi",
+      name: "队列测试文本模型",
+      vendorId: "test",
+      modelName: "text-model",
+      disabled: false,
+    });
+    const pricingNow = Date.now();
+    await db("o_modelPricing").insert([
+      {
+        providerId: "test", modelId: "text-model", taskType: "text", billingMode: "per_request",
+        requestPrice: 0, currency: "CNY", version: 1, status: "active", effectiveAt: pricingNow,
+        createdBy: 1, createdAt: pricingNow,
+      },
+      {
+        providerId: "1", modelId: "image-model", taskType: "image", billingMode: "per_request",
+        requestPrice: 0, currency: "CNY", version: 1, status: "active", effectiveAt: pricingNow,
+        createdBy: 1, createdAt: pricingNow,
+      },
+      {
+        providerId: "1", modelId: "video-model", taskType: "video", billingMode: "per_request",
+        requestPrice: 0, currency: "CNY", version: 1, status: "active", effectiveAt: pricingNow,
+        createdBy: 1, createdAt: pricingNow,
+      },
+    ]);
+    await db("o_quotaAccount").update({ balance: 1_000_000 });
     assert.equal(await db("o_concurrencyPolicy").where({ scopeType: "group" }).count({ count: "id" }).first().then((row) => Number(row?.count)), 2);
     assert.equal(await db("o_concurrencyPolicy").where({ scopeType: "user" }).count({ count: "id" }).first().then((row) => Number(row?.count)), 3);
     assert.equal(await db("o_concurrencyPolicy").where({ scopeType: "user", scopeId: 1 }).first(), undefined);
@@ -2042,6 +2216,7 @@ async function main(): Promise<void> {
     await testExpiredLeaseRecovery(db);
     await testWorkerLifecycle(db);
     await testUsageAndQuotaLedger(db);
+    await testPricedUsageRequiresItsReservation(db);
     await testUsageMicroUnitArithmetic(db);
     await db("o_concurrencyPolicy").where({ scopeType: "group", scopeId: 101 }).update({ totalLimit: 7 });
     await migrateGenerationQueue(db);

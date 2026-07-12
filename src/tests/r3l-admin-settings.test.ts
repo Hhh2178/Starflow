@@ -8,6 +8,7 @@ import {
   getAiConfigOverview,
   getProviderOverview,
   getSystemOverview,
+  testProviderConnection,
   updateAiDeployment,
   updateAiUseMode,
   updateDevelopmentSettings,
@@ -16,6 +17,7 @@ import {
 } from "@/services/adminSettings";
 import { createProviderOverviewRouter } from "@/routes/admin/providers/getOverview";
 import { createUpdateProviderRouter } from "@/routes/admin/providers/updateProvider";
+import { createTestConnectionRouter } from "@/routes/admin/providers/testConnection";
 import { createAiConfigOverviewRouter } from "@/routes/admin/ai-config/getOverview";
 import { createUpdateDeploymentRouter } from "@/routes/admin/ai-config/updateDeployment";
 import { createUpdateUseModeRouter } from "@/routes/admin/ai-config/updateUseMode";
@@ -105,9 +107,9 @@ async function testServices(db: Knex): Promise<void> {
       { type: "video", count: 1 },
     ],
     models: [
-      { name: "Text Alpha", type: "text" },
-      { name: "Image Alpha", type: "image" },
-      { name: "Video Beta", type: "video" },
+      { name: "Text Alpha", modelName: "text-alpha", type: "text" },
+      { name: "Image Alpha", modelName: "image-alpha", type: "image" },
+      { name: "Video Beta", modelName: "video-beta", type: "video" },
     ],
   }]);
   assert.deepEqual(superProviders.capabilities, { read: true, update: true });
@@ -145,6 +147,10 @@ async function testServices(db: Knex): Promise<void> {
     enabled: true,
     inputValues: { apiKey: "rotated-secret" },
   }, db), 403, "SUPER_ADMIN_REQUIRED");
+  await expectSettingsError(testProviderConnection(actors.admin, {
+    id: "secureVendor",
+    modelName: "text-alpha",
+  }, db, resolveVendor), 403, "SUPER_ADMIN_REQUIRED");
   await expectSettingsError(updateAiUseMode(actors.admin, "1", db), 403, "SUPER_ADMIN_REQUIRED");
   await expectSettingsError(getSystemOverview(actors.admin, db), 403, "SUPER_ADMIN_REQUIRED");
   await expectSettingsError(updateDevelopmentSettings(actors.admin, true, db), 403, "SUPER_ADMIN_REQUIRED");
@@ -157,6 +163,31 @@ async function testServices(db: Knex): Promise<void> {
   const storedInputs = JSON.parse((await db("o_vendorConfig").where({ id: "secureVendor" }).first()).inputValues);
   assert.equal(storedInputs.apiKey, "rotated-secret");
   assert.equal(storedInputs.baseUrl, "https://provider.invalid");
+
+  const connectionCalls: Array<{ url: string; authorization: string }> = [];
+  const connectionResult = await testProviderConnection(
+    actors.superAdmin,
+    { id: "secureVendor", modelName: "text-alpha" },
+    db,
+    resolveVendor,
+    async (input, init) => {
+      connectionCalls.push({ url: String(input), authorization: String((init?.headers as Record<string, string>)?.Authorization ?? "") });
+      return new Response(JSON.stringify({ data: [{ id: "text-alpha" }, { id: "image-alpha" }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    },
+  );
+  assert.equal(connectionCalls.length, 1);
+  assert.equal(connectionCalls[0].url, "https://provider.invalid/v1/models");
+  assert.equal(connectionCalls[0].authorization, "Bearer rotated-secret");
+  assert.equal(connectionResult.providerId, "secureVendor");
+  assert.equal(connectionResult.modelName, "text-alpha");
+  assert.equal(connectionResult.status, "available");
+  assert.equal(connectionResult.modelAvailable, true);
+  assert.equal(typeof connectionResult.latencyMs, "number");
+  assert.equal(typeof connectionResult.checkedAt, "number");
+  assertNoSecrets(connectionResult);
 
   await updateAiUseMode(actors.superAdmin, "1", db);
   await updateAiDeployment(actors.superAdmin, {
@@ -210,6 +241,16 @@ async function testRoutes(db: Knex): Promise<void> {
   });
   app.use("/api/admin/providers/getOverview", createProviderOverviewRouter((actor) => getProviderOverview(actor, db, resolveVendor)));
   app.use("/api/admin/providers/updateProvider", createUpdateProviderRouter((actor, input) => updateProvider(actor, input, db)));
+  app.use("/api/admin/providers/testConnection", createTestConnectionRouter((actor, input) => testProviderConnection(
+    actor,
+    input,
+    db,
+    resolveVendor,
+    async () => new Response(JSON.stringify({ data: [{ id: "text-alpha" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }),
+  )));
   app.use("/api/admin/ai-config/getOverview", createAiConfigOverviewRouter((actor) => getAiConfigOverview(actor, db)));
   app.use("/api/admin/ai-config/updateDeployment", createUpdateDeploymentRouter((actor, input) => updateAiDeployment(actor, input, db)));
   app.use("/api/admin/ai-config/updateUseMode", createUpdateUseModeRouter((actor, mode) => updateAiUseMode(actor, mode, db)));
@@ -231,6 +272,7 @@ async function testRoutes(db: Knex): Promise<void> {
 
     const writes: Array<[string, unknown]> = [
       ["/providers/updateProvider", { id: "secureVendor", enabled: false, inputValues: { apiKey: "rotated-secret" } }],
+      ["/providers/testConnection", { id: "secureVendor", modelName: "text-alpha" }],
       ["/ai-config/updateUseMode", { agentUseMode: "0" }],
       ["/ai-config/updateDeployment", { id: 9001, vendorId: "secureVendor", model: "Text Alpha", modelName: "text-alpha", disabled: false }],
       ["/system/updateDevelopment", { aiDevToolsEnabled: false }],

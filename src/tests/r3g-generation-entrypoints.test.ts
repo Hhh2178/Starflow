@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import knex from "knex";
 import initDB from "@/lib/initDB";
+import { migrateGenerationQueue } from "@/lib/fixDB";
 import type { AuthUser } from "@/types/auth";
 import type { GenerationExecutionContext } from "@/types/generationQueue";
 import { executeCoreImageGeneration } from "@/jobs/handlers/coreImageExecutor";
@@ -29,6 +30,15 @@ async function main() {
       { id: 601, projectId: 1001, name: "角色甲", type: "role", prompt: "hero" },
       { id: 602, projectId: 1001, name: "场景甲", type: "scene", prompt: "city" },
     ]);
+    await db("o_agentDeploy").insert({
+      id: 1, key: "universalAi", name: "测试文本模型", vendorId: "test", modelName: "text", disabled: false,
+    });
+    await migrateGenerationQueue(db);
+    await db("o_modelPricing").insert([
+      { providerId: "vendor", modelId: "image", taskType: "image", billingMode: "per_request", requestPrice: 0, currency: "CNY", version: 1, status: "active", effectiveAt: now, createdBy: 1, createdAt: now },
+      { providerId: "test", modelId: "text", taskType: "text", billingMode: "per_request", requestPrice: 0, currency: "CNY", version: 1, status: "active", effectiveAt: now, createdBy: 1, createdAt: now },
+    ]);
+    await db("o_quotaAccount").where({ groupId: 101 }).update({ balance: 100 });
 
     const assetItems = await enqueueAssetImageJobs(actor, { projectId: 1001, assetIds: [601, 602] }, "asset-request", db);
     assert.equal(assetItems.length, 2);
@@ -61,6 +71,7 @@ async function main() {
     assert.deepEqual(providerMarkers, [`image:${editItem.jobId}`]);
     assert.equal(calls.length, 2);
     assert.deepEqual(execution.result, { imageId: 1001, path: "/oss/small/1001/workFlow/fixed.jpg" });
+    assert.deepEqual(execution.metering.units, { requests: 1, images: 1 });
 
     const routeCalls: Array<{ kind: string; input: any; requestId: string }> = [];
     const app = express(); app.use(express.json()); app.use((req, _res, next) => { (req as any).user = actor; next(); });

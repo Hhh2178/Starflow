@@ -98,11 +98,17 @@ async function testQuotaOverviewScopeAndAggregation(db: Knex): Promise<void> {
     groupId: 101,
     groupName: "A组",
     balance: 306,
+    reservedBalance: 0,
+    availableBalance: 306,
+    billingStatus: "active",
     totalRecharge: 100,
     totalUsage: 15,
   });
   assert.deepEqual(superOverview.summary, {
     balance: 341,
+    reservedBalance: 0,
+    availableBalance: 341,
+    billingStatus: "active",
     totalRecharge: 140,
     totalUsage: 20,
   });
@@ -113,6 +119,9 @@ async function testQuotaOverviewScopeAndAggregation(db: Knex): Promise<void> {
   assert.deepEqual(adminOverview.groups.map((item) => item.groupId), [101]);
   assert.deepEqual(adminOverview.summary, {
     balance: 306,
+    reservedBalance: 0,
+    availableBalance: 306,
+    billingStatus: "active",
     totalRecharge: 100,
     totalUsage: 15,
   });
@@ -226,7 +235,14 @@ async function testQuotaMicroUnitArithmetic(db: Knex): Promise<void> {
   assert.equal(Number(ledgers[1].balanceBefore), Number(ledgers[0].balanceAfter));
   assert.equal(Number(ledgers[1].balanceAfter), 0.3);
   const overview = await getQuotaOverview(actors.adminA, db);
-  assert.deepEqual(overview.summary, { balance: 0.3, totalRecharge: 0.1, totalUsage: 0 });
+  assert.deepEqual(overview.summary, {
+    balance: 0.3,
+    reservedBalance: 0,
+    availableBalance: 0.3,
+    billingStatus: "active",
+    totalRecharge: 0.1,
+    totalUsage: 0,
+  });
 
   await expectServiceError(
     adjustQuota(

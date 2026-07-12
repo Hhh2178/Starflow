@@ -1,6 +1,12 @@
 import type { Knex } from "knex";
 import type { AuthUser } from "@/types/auth";
-import type { GenerationJobStatus, GenerationTaskType } from "@/types/generationQueue";
+import type { BillingUnits, GenerationJobStatus, GenerationTaskType } from "@/types/generationQueue";
+import { ModelPricingError } from "@/services/modelPricing";
+import {
+  QuotaReservationError,
+  releaseQuotaReservation,
+  reserveQuotaForJob,
+} from "@/services/quotaReservation";
 
 type QueueConnection = Knex | Knex.Transaction;
 
@@ -11,6 +17,7 @@ export interface EnqueueGenerationInput {
   taskType: GenerationTaskType;
   payload: unknown;
   idempotencyKey: string;
+  billingUnits?: BillingUnits;
 }
 
 export interface GenerationJobRecord {
@@ -201,41 +208,72 @@ export async function enqueueGeneration(
   connection?: QueueConnection,
 ): Promise<GenerationJobRecord> {
   const resolvedConnection = await resolveConnection(connection);
-  const project = await resolvedConnection("o_project").where({ id: input.projectId }).first();
-  if (!project || !canAccessProject(actor, project) || project.groupId == null || project.ownerUserId == null) {
-    throw new GenerationQueueError(404, "PROJECT_NOT_FOUND", "项目不存在或当前账号无权访问");
-  }
   assertSafePayload(input.payload);
   const payloadJson = stableJsonStringify(input.payload);
+  try {
+    return await inTransaction(resolvedConnection, async (trx) => {
+      const project = await trx("o_project").where({ id: input.projectId }).first();
+      if (!project || !canAccessProject(actor, project) || project.groupId == null || project.ownerUserId == null) {
+        throw new GenerationQueueError(404, "PROJECT_NOT_FOUND", "项目不存在或当前账号无权访问");
+      }
+      const duplicate = await trx("o_generationJob").where({ idempotencyKey: input.idempotencyKey }).first();
+      if (duplicate) {
+        if (
+          Number(duplicate.projectId) !== input.projectId
+          || String(duplicate.handlerKey) !== input.handlerKey
+          || String(duplicate.taskType) !== input.taskType
+          || !storedPayloadMatches(duplicate.payloadJson, input.payload)
+        ) {
+          throw new GenerationQueueError(409, "IDEMPOTENCY_KEY_CONFLICT", "幂等键已被其他任务使用");
+        }
+        return toJobRecord(duplicate);
+      }
 
-  const duplicate = await resolvedConnection("o_generationJob").where({ idempotencyKey: input.idempotencyKey }).first();
-  if (duplicate) {
-    if (
-      Number(duplicate.projectId) !== input.projectId
-      || String(duplicate.handlerKey) !== input.handlerKey
-      || String(duplicate.taskType) !== input.taskType
-      || !storedPayloadMatches(duplicate.payloadJson, input.payload)
-    ) {
-      throw new GenerationQueueError(409, "IDEMPOTENCY_KEY_CONFLICT", "幂等键已被其他任务使用");
+      const payload = input.payload as Record<string, unknown>;
+      const payloadModel = typeof payload?.model === "string" ? payload.model : "";
+      const model = payloadModel || (
+        input.taskType === "text"
+          ? "universalAi"
+          : input.taskType === "image"
+            ? String(project.imageModel ?? "")
+            : String(project.videoModel ?? "")
+      );
+      const billingUnits = input.billingUnits ?? (
+        input.taskType === "video"
+          ? { requests: 1, seconds: Number(payload?.duration ?? 0) }
+          : input.taskType === "image"
+            ? { requests: 1, images: 1 }
+            : { requests: 1 }
+      );
+      const queuedAt = Date.now();
+      const [id] = await trx("o_generationJob").insert({
+        groupId: Number(project.groupId),
+        ownerUserId: Number(project.ownerUserId),
+        projectId: input.projectId,
+        sourceTaskId: input.sourceTaskId ?? null,
+        handlerKey: input.handlerKey,
+        taskType: input.taskType,
+        status: "queued",
+        priority: 0,
+        payloadJson,
+        idempotencyKey: input.idempotencyKey,
+        queuedAt,
+      });
+      await reserveQuotaForJob(trx, {
+        jobId: Number(id),
+        groupId: Number(project.groupId),
+        taskType: input.taskType,
+        model,
+        units: billingUnits,
+      });
+      return toJobRecord(await trx("o_generationJob").where({ id }).first());
+    });
+  } catch (error) {
+    if (error instanceof QuotaReservationError || error instanceof ModelPricingError) {
+      throw new GenerationQueueError(error.status, error.code, error.message);
     }
-    return toJobRecord(duplicate);
+    throw error;
   }
-
-  const queuedAt = Date.now();
-  const [id] = await resolvedConnection("o_generationJob").insert({
-    groupId: Number(project.groupId),
-    ownerUserId: Number(project.ownerUserId),
-    projectId: input.projectId,
-    sourceTaskId: input.sourceTaskId ?? null,
-    handlerKey: input.handlerKey,
-    taskType: input.taskType,
-    status: "queued",
-    priority: 0,
-    payloadJson,
-    idempotencyKey: input.idempotencyKey,
-    queuedAt,
-  });
-  return toJobRecord(await resolvedConnection("o_generationJob").where({ id }).first());
 }
 
 export async function cancelGenerationJob(
@@ -253,6 +291,7 @@ export async function cancelGenerationJob(
       await trx("o_generationJob")
         .where({ id: jobId, status: "queued" })
         .update({ status: "cancelled", cancellationRequestedAt: now, finishedAt: now });
+      await releaseQuotaReservation(trx, jobId, "queued_cancelled");
     } else if (job.status === "running" || job.status === "recovering") {
       await trx("o_generationJob")
         .where({ id: jobId })

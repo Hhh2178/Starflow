@@ -1,4 +1,4 @@
-// @db-hash b2da9160a643dd98c50b7f4dd2ddd8c7
+// @db-hash 1b9ad03ff611553d022b357077df13f7
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -127,10 +127,12 @@ export interface o_generationJob {
   'leaseOwner'?: string | null;
   'ownerUserId': number;
   'payloadJson': string;
+  'pricingSnapshotJson'?: string;
   'priority'?: number;
   'projectId'?: number | null;
   'providerRequestId'?: string | null;
   'queuedAt': number;
+  'reservedAmount'?: number | null;
   'resultJson'?: string | null;
   'sourceTaskId'?: number | null;
   'startedAt'?: number | null;
@@ -160,6 +162,24 @@ export interface o_imageFlow {
   'flowData': string;
   'id'?: number;
   'projectId'?: number | null;
+}
+export interface o_modelPricing {
+  'billingMode': string;
+  'createdAt': number;
+  'createdBy': number;
+  'currency'?: string;
+  'effectiveAt': number;
+  'fallbackRequestPrice'?: number | null;
+  'id'?: number;
+  'inputPricePerMillion'?: number | null;
+  'modelId': string;
+  'outputPricePerMillion'?: number | null;
+  'providerId': string;
+  'requestPrice'?: number | null;
+  'secondPrice'?: number | null;
+  'status': string;
+  'taskType': string;
+  'version': number;
 }
 export interface o_modelPrompt {
   'fileName'?: string | null;
@@ -207,7 +227,9 @@ export interface o_prompt {
 }
 export interface o_quotaAccount {
   'balance'?: number;
+  'billingStatus'?: string;
   'groupId'?: number | null;
+  'reservedBalance'?: number;
   'updatedAt': number;
 }
 export interface o_quotaLedger {
@@ -221,6 +243,19 @@ export interface o_quotaLedger {
   'id'?: number;
   'reason': string;
   'usageLedgerId'?: number | null;
+}
+export interface o_quotaReservation {
+  'createdAt': number;
+  'finalAmount'?: number | null;
+  'groupId': number;
+  'id'?: number;
+  'jobId': number;
+  'pricingId': number;
+  'reason'?: string | null;
+  'releasedAt'?: number | null;
+  'reservedAmount': number;
+  'settledAt'?: number | null;
+  'status': string;
 }
 export interface o_script {
   'content'?: string | null;
@@ -310,8 +345,8 @@ export interface o_user {
   'name'?: string | null;
   'password'?: string | null;
   'passwordHash'?: string | null;
-  'role'?: string;
-  'status'?: string;
+  'role'?: string | null;
+  'status'?: string | null;
   'updatedAt'?: number | null;
 }
 export interface o_vendorConfig {
@@ -359,12 +394,14 @@ export interface DB {
   "o_group": o_group;
   "o_image": o_image;
   "o_imageFlow": o_imageFlow;
+  "o_modelPricing": o_modelPricing;
   "o_modelPrompt": o_modelPrompt;
   "o_novel": o_novel;
   "o_project": o_project;
   "o_prompt": o_prompt;
   "o_quotaAccount": o_quotaAccount;
   "o_quotaLedger": o_quotaLedger;
+  "o_quotaReservation": o_quotaReservation;
   "o_script": o_script;
   "o_scriptAssets": o_scriptAssets;
   "o_setting": o_setting;

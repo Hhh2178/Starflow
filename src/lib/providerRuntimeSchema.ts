@@ -6,6 +6,12 @@ interface RuntimeTableSchema {
   initData?: (knex: Knex) => Promise<void>;
 }
 
+interface RuntimeColumnSchema {
+  table: "o_providerRuntimeProfile" | "o_providerModelProfile";
+  name: string;
+  builder: (table: Knex.AlterTableBuilder) => void;
+}
+
 const now = () => Date.now();
 
 export async function seedLegacyProviderProfiles(knex: Knex): Promise<void> {
@@ -38,6 +44,8 @@ export const providerRuntimeTableSchemas: RuntimeTableSchema[] = [
       table.boolean("enabled").notNullable().defaultTo(false);
       table.text("migrationState").notNullable().defaultTo("legacy");
       table.text("adapterId").notNullable().defaultTo("legacy");
+      table.text("note");
+      table.text("advancedConfigJson").notNullable().defaultTo("{}");
       table.integer("revision").notNullable().defaultTo(1);
       table.integer("createdAt").notNullable();
       table.integer("updatedAt").notNullable();
@@ -56,6 +64,10 @@ export const providerRuntimeTableSchemas: RuntimeTableSchema[] = [
       table.text("inputProfileJson").notNullable().defaultTo("{}");
       table.text("parameterSchemaJson").notNullable().defaultTo("{}");
       table.text("outputMappingJson").notNullable().defaultTo("{}");
+      table.text("capabilityTagsJson").notNullable().defaultTo("[]");
+      table.text("inputCapabilitiesJson").notNullable().defaultTo("{}");
+      table.text("advancedConfigJson").notNullable().defaultTo("{}");
+      table.text("protocolOverride");
       table.boolean("enabled").notNullable().defaultTo(true);
       table.integer("revision").notNullable().defaultTo(1);
       table.integer("createdAt").notNullable();
@@ -111,9 +123,26 @@ export const providerRuntimeTableSchemas: RuntimeTableSchema[] = [
   },
 ];
 
+const providerRuntimeColumnSchemas: RuntimeColumnSchema[] = [
+  { table: "o_providerRuntimeProfile", name: "note", builder: (table) => table.text("note") },
+  { table: "o_providerRuntimeProfile", name: "advancedConfigJson", builder: (table) => table.text("advancedConfigJson").notNullable().defaultTo("{}") },
+  { table: "o_providerModelProfile", name: "capabilityTagsJson", builder: (table) => table.text("capabilityTagsJson").notNullable().defaultTo("[]") },
+  { table: "o_providerModelProfile", name: "inputCapabilitiesJson", builder: (table) => table.text("inputCapabilitiesJson").notNullable().defaultTo("{}") },
+  { table: "o_providerModelProfile", name: "advancedConfigJson", builder: (table) => table.text("advancedConfigJson").notNullable().defaultTo("{}") },
+  { table: "o_providerModelProfile", name: "protocolOverride", builder: (table) => table.text("protocolOverride") },
+];
+
+async function ensureProviderRuntimeColumns(knex: Knex): Promise<void> {
+  for (const column of providerRuntimeColumnSchemas) {
+    if (await knex.schema.hasColumn(column.table, column.name)) continue;
+    await knex.schema.alterTable(column.table, column.builder);
+  }
+}
+
 export async function ensureProviderRuntimeSchema(knex: Knex): Promise<void> {
   for (const table of providerRuntimeTableSchemas) {
     if (!(await knex.schema.hasTable(table.name))) await knex.schema.createTable(table.name, table.builder);
   }
+  await ensureProviderRuntimeColumns(knex);
   await seedLegacyProviderProfiles(knex);
 }

@@ -1,4 +1,4 @@
-// @db-hash 028e3c05b1c6c7f7844a04986ff14e8e
+// @db-hash f1826dd5cb7e49874ad6c3dca5827490
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -226,16 +226,20 @@ export interface o_prompt {
   'useData'?: string | null;
 }
 export interface o_providerModelProfile {
+  'advancedConfigJson'?: string;
   'capability': string;
+  'capabilityTagsJson'?: string;
   'createdAt': number;
   'displayName': string;
   'enabled'?: boolean;
   'executionMode': string;
   'id'?: number;
+  'inputCapabilitiesJson'?: string;
   'inputProfileJson'?: string;
   'modelId': string;
   'outputMappingJson'?: string;
   'parameterSchemaJson'?: string;
+  'protocolOverride'?: string | null;
   'providerId': string;
   'revision'?: number;
   'updatedAt': number;
@@ -252,11 +256,13 @@ export interface o_providerProtocolProfile {
 }
 export interface o_providerRuntimeProfile {
   'adapterId'?: string;
+  'advancedConfigJson'?: string;
   'createdAt': number;
   'displayName': string;
   'enabled'?: boolean;
   'id'?: number;
   'migrationState'?: string;
+  'note'?: string | null;
   'providerId': string;
   'revision'?: number;
   'updatedAt': number;

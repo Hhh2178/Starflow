@@ -48,7 +48,7 @@ async function testFreshSchema(db: Knex): Promise<void> {
   }
 
   const providerColumns = await columns(db, "o_providerRuntimeProfile");
-  for (const column of ["providerId", "displayName", "enabled", "migrationState", "adapterId", "revision", "createdAt", "updatedAt"]) {
+  for (const column of ["providerId", "displayName", "enabled", "migrationState", "adapterId", "note", "advancedConfigJson", "revision", "createdAt", "updatedAt"]) {
     assert.equal(providerColumns.has(column), true, `provider profile missing ${column}`);
   }
   for (const forbidden of ["apiKey", "credentials", "inputValues", "secret"]) {
@@ -56,7 +56,7 @@ async function testFreshSchema(db: Knex): Promise<void> {
   }
 
   const modelColumns = await columns(db, "o_providerModelProfile");
-  for (const column of ["providerId", "modelId", "displayName", "capability", "executionMode", "parameterSchemaJson", "enabled", "revision", "createdAt", "updatedAt"]) {
+  for (const column of ["providerId", "modelId", "displayName", "capability", "executionMode", "parameterSchemaJson", "capabilityTagsJson", "inputCapabilitiesJson", "advancedConfigJson", "protocolOverride", "enabled", "revision", "createdAt", "updatedAt"]) {
     assert.equal(modelColumns.has(column), true, `model profile missing ${column}`);
   }
   const protocolColumns = await columns(db, "o_providerProtocolProfile");
@@ -90,6 +90,70 @@ async function testFreshSchema(db: Knex): Promise<void> {
     createdAt: Date.now(),
     updatedAt: Date.now(),
   }));
+}
+
+async function testRuntimeV2ColumnMigration(): Promise<void> {
+  const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
+  try {
+    await db.schema.createTable("o_vendorConfig", (table) => {
+      table.string("id").primary();
+      table.text("inputValues");
+      table.text("models");
+      table.integer("enable");
+    });
+    await db.schema.createTable("o_providerRuntimeProfile", (table) => {
+      table.increments("id").primary();
+      table.text("providerId").notNullable().unique();
+      table.text("displayName").notNullable();
+      table.boolean("enabled").notNullable().defaultTo(false);
+      table.text("migrationState").notNullable().defaultTo("legacy");
+      table.text("adapterId").notNullable().defaultTo("legacy");
+      table.integer("revision").notNullable().defaultTo(1);
+      table.integer("createdAt").notNullable();
+      table.integer("updatedAt").notNullable();
+    });
+    await db.schema.createTable("o_providerModelProfile", (table) => {
+      table.increments("id").primary();
+      table.text("providerId").notNullable();
+      table.text("modelId").notNullable();
+      table.text("displayName").notNullable();
+      table.text("capability").notNullable();
+      table.text("executionMode").notNullable();
+      table.text("inputProfileJson").notNullable().defaultTo("{}");
+      table.text("parameterSchemaJson").notNullable().defaultTo("{}");
+      table.text("outputMappingJson").notNullable().defaultTo("{}");
+      table.boolean("enabled").notNullable().defaultTo(true);
+      table.integer("revision").notNullable().defaultTo(1);
+      table.integer("createdAt").notNullable();
+      table.integer("updatedAt").notNullable();
+      table.unique(["providerId", "modelId"]);
+    });
+    await db("o_vendorConfig").insert({ id: "legacy-v2", inputValues: "{}", models: "[]", enable: 1 });
+    await db("o_providerRuntimeProfile").insert({ providerId: "legacy-v2", displayName: "Legacy V2", enabled: 1, migrationState: "legacy", adapterId: "legacy", revision: 1, createdAt: 1, updatedAt: 1 });
+    await db("o_providerModelProfile").insert({ providerId: "legacy-v2", modelId: "video-a", displayName: "Video A", capability: "video", executionMode: "legacy", enabled: 1, revision: 1, createdAt: 1, updatedAt: 1 });
+
+    await migrateProviderRuntimeProfiles(db);
+    const providerColumns = await columns(db, "o_providerRuntimeProfile");
+    const modelColumns = await columns(db, "o_providerModelProfile");
+    assert.equal(providerColumns.has("note"), true);
+    assert.equal(providerColumns.has("advancedConfigJson"), true);
+    for (const column of ["capabilityTagsJson", "inputCapabilitiesJson", "advancedConfigJson", "protocolOverride"]) assert.equal(modelColumns.has(column), true);
+
+    await db("o_providerRuntimeProfile").where({ providerId: "legacy-v2" }).update({ note: "keep-note", advancedConfigJson: JSON.stringify({ request: { method: "POST" } }) });
+    await db("o_providerModelProfile").where({ providerId: "legacy-v2", modelId: "video-a" }).update({ capabilityTagsJson: JSON.stringify(["first_frame_video"]), inputCapabilitiesJson: JSON.stringify({ frameModes: ["first_frame"] }), advancedConfigJson: JSON.stringify({ request: { fixedBody: { model: "video-a" } } }), protocolOverride: "async_task_poll_result" });
+
+    await migrateProviderRuntimeProfiles(db);
+    const provider = await db("o_providerRuntimeProfile").where({ providerId: "legacy-v2" }).first();
+    const model = await db("o_providerModelProfile").where({ providerId: "legacy-v2", modelId: "video-a" }).first();
+    assert.equal(provider.note, "keep-note");
+    assert.deepEqual(JSON.parse(provider.advancedConfigJson), { request: { method: "POST" } });
+    assert.deepEqual(JSON.parse(model.capabilityTagsJson), ["first_frame_video"]);
+    assert.deepEqual(JSON.parse(model.inputCapabilitiesJson), { frameModes: ["first_frame"] });
+    assert.deepEqual(JSON.parse(model.advancedConfigJson), { request: { fixedBody: { model: "video-a" } } });
+    assert.equal(model.protocolOverride, "async_task_poll_result");
+  } finally {
+    await db.destroy();
+  }
 }
 
 async function testProfileService(db: Knex): Promise<void> {
@@ -388,6 +452,7 @@ async function main(): Promise<void> {
     await db.destroy();
   }
   await testLegacyMigration();
+  await testRuntimeV2ColumnMigration();
   await testLegacyAdapterBridge();
   await testRuntimeGateway();
   await testRuntimeKitRegistryMapping();

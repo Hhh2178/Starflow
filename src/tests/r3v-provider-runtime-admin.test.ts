@@ -9,6 +9,7 @@ import {
   deleteRuntimeProvider,
   listRuntimeModels,
   listRuntimeProviders,
+  getRuntimeProtocol,
   listRuntimeTestHistory,
   ProviderRuntimeAdminError,
   runRuntimeTest,
@@ -30,15 +31,18 @@ async function main() {
     await updateRuntimeProvider(superAdmin, "native-test", 1, { displayName: "Native Updated" }, db);
     await assert.rejects(updateRuntimeProvider(superAdmin, "native-test", 1, { enabled: false }, db), /updated|更新/);
 
-    await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "chat-a", displayName: "Chat A", capability: "text", executionMode: "sync", parameterSchema: { prompt: { type: "string" } }, enabled: true }, db);
+    await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "chat-a", displayName: "Chat A", capability: "text", executionMode: "sync", inputProfile: { prompt: true }, parameterSchema: { prompt: { type: "string" } }, outputMapping: { text: "choices.0.message.content" }, enabled: true }, db);
     await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "image-a", displayName: "Image A", capability: "image", executionMode: "background_poll", enabled: false }, db);
     assert.equal((await listRuntimeProviders(admin, db)).some((item) => item.providerId === "native-test" && item.modelCount === 2), true);
     await updateRuntimeModel(superAdmin, "native-test", "chat-a", 1, { displayName: "Chat Updated" }, db);
-    const filtered = await listRuntimeModels(superAdmin, { page: 1, pageSize: 10, query: "chat", capability: "text", enabled: true, executionMode: "sync" }, db);
+    const filtered = await listRuntimeModels(superAdmin, { page: 1, pageSize: 10, providerId: "native-test", query: "chat", capability: "text", enabled: true, executionMode: "sync" }, db);
     assert.equal(filtered.total, 1);
     assert.equal(filtered.items[0].displayName, "Chat Updated");
+    assert.deepEqual(filtered.items[0].inputProfile, { prompt: true });
+    assert.deepEqual(filtered.items[0].outputMapping, { text: "choices.0.message.content" });
 
     await upsertRuntimeProtocol(superAdmin, { providerId: "native-test", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1", credentialRef: "secret://provider/native-test" }, enabled: true }, db);
+    assert.deepEqual(await getRuntimeProtocol(admin, "native-test", db), { providerId: "native-test", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1" }, enabled: true, revision: 1 });
     await assert.rejects(upsertRuntimeProtocol(superAdmin, { providerId: "native-test", protocolType: "standard", config: { apiKey: "sk-must-not-store" }, enabled: true, expectedRevision: 1 }, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "INLINE_CREDENTIAL_FORBIDDEN");
 
     await assert.rejects(runRuntimeTest(superAdmin, { providerId: "native-test", modelId: "chat-a", testType: "generation" }, async () => undefined, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "BILLABLE_CONFIRMATION_REQUIRED");

@@ -6,13 +6,13 @@ import { testProviderConnection } from "@/services/adminSettings";
 import { enqueueGeneration } from "@/services/generationQueue";
 import {
   createRuntimeModel, createRuntimeProvider, deleteRuntimeModel, deleteRuntimeProvider,
-  listRuntimeModels, listRuntimeProviders, listRuntimeTestHistory, runRuntimeTest,
+  getRuntimeProtocol, listRuntimeModels, listRuntimeProviders, listRuntimeTestHistory, runRuntimeTest,
   updateRuntimeModel, updateRuntimeProvider, upsertRuntimeProtocol,
 } from "@/services/providerRuntime/adminService";
 
 const id = z.string().trim().min(1).max(128);
 const provider = z.strictObject({ providerId: id, displayName: z.string().trim().min(1).max(200), enabled: z.boolean(), migrationState: z.enum(["legacy", "shadow", "native"]), adapterId: id });
-const model = z.strictObject({ providerId: id, modelId: id, displayName: z.string().trim().min(1).max(200), capability: z.enum(["text", "image", "video", "audio", "json"]), executionMode: z.enum(["sync", "background_poll", "webhook", "runninghub", "legacy"]), parameterSchema: z.record(z.string(), z.unknown()).optional(), enabled: z.boolean() });
+const model = z.strictObject({ providerId: id, modelId: id, displayName: z.string().trim().min(1).max(200), capability: z.enum(["text", "image", "video", "audio", "json"]), executionMode: z.enum(["sync", "background_poll", "webhook", "runninghub", "legacy"]), inputProfile: z.record(z.string(), z.unknown()).optional(), parameterSchema: z.record(z.string(), z.unknown()).optional(), outputMapping: z.record(z.string(), z.unknown()).optional(), enabled: z.boolean() });
 const protocol = z.strictObject({ providerId: id, protocolType: z.enum(["standard", "poll", "webhook", "runninghub", "legacy"]), config: z.record(z.string(), z.unknown()), enabled: z.boolean(), expectedRevision: z.number().int().positive().optional() });
 
 function sendFailure(res: express.Response, cause: unknown) {
@@ -24,7 +24,7 @@ export function createProviderRuntimeAdminRouter() {
   const router = express.Router();
   router.get("/providers", async (req, res) => { try { return res.send(success(await listRuntimeProviders(getAuthUser(req)))); } catch (cause) { return sendFailure(res, cause); } });
   router.get("/models", async (req, res) => {
-    try { return res.send(success(await listRuntimeModels(getAuthUser(req), { page: Number(req.query.page || 1), pageSize: Number(req.query.pageSize || 20), query: req.query.query as string | undefined, capability: req.query.capability as string | undefined, executionMode: req.query.executionMode as string | undefined, enabled: req.query.enabled === undefined ? undefined : req.query.enabled === "true" }))); } catch (cause) { return sendFailure(res, cause); }
+    try { return res.send(success(await listRuntimeModels(getAuthUser(req), { page: Number(req.query.page || 1), pageSize: Number(req.query.pageSize || 20), providerId: req.query.providerId as string | undefined, query: req.query.query as string | undefined, capability: req.query.capability as string | undefined, executionMode: req.query.executionMode as string | undefined, enabled: req.query.enabled === undefined ? undefined : req.query.enabled === "true" }))); } catch (cause) { return sendFailure(res, cause); }
   });
   router.post("/providers", async (req, res) => { const parsed = provider.safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" })); try { return res.send(success(await createRuntimeProvider(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); } });
   router.patch("/providers/:providerId", async (req, res) => {
@@ -41,6 +41,7 @@ export function createProviderRuntimeAdminRouter() {
   });
   router.delete("/models/:providerId/:modelId", async (req, res) => { try { return res.send(success(await deleteRuntimeModel(getAuthUser(req), req.params.providerId, req.params.modelId))); } catch (cause) { return sendFailure(res, cause); } });
   router.put("/protocols", async (req, res) => { const parsed = protocol.safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" })); try { return res.send(success(await upsertRuntimeProtocol(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); } });
+  router.get("/protocols/:providerId", async (req, res) => { try { return res.send(success(await getRuntimeProtocol(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
   router.post("/tests/connection", async (req, res) => {
     const parsed = z.strictObject({ providerId: id, modelId: id }).safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" }));
     const actor = getAuthUser(req); try { return res.send(success(await runRuntimeTest(actor, { ...parsed.data, testType: "connection" }, () => testProviderConnection(actor, { id: parsed.data.providerId, modelName: parsed.data.modelId })))); } catch (cause) { return sendFailure(res, cause); }

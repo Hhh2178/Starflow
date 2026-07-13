@@ -12,7 +12,7 @@ export class ProviderRuntimeAdminError extends Error {
 }
 
 export interface ProviderInput { providerId: string; displayName: string; enabled: boolean; migrationState: "legacy" | "shadow" | "native"; adapterId: string }
-export interface ModelInput { providerId: string; modelId: string; displayName: string; capability: "text" | "image" | "video" | "audio" | "json"; executionMode: "sync" | "background_poll" | "webhook" | "runninghub" | "legacy"; parameterSchema?: Record<string, unknown>; enabled: boolean }
+export interface ModelInput { providerId: string; modelId: string; displayName: string; capability: "text" | "image" | "video" | "audio" | "json"; executionMode: "sync" | "background_poll" | "webhook" | "runninghub" | "legacy"; inputProfile?: Record<string, unknown>; parameterSchema?: Record<string, unknown>; outputMapping?: Record<string, unknown>; enabled: boolean }
 export interface ProtocolInput { providerId: string; protocolType: "standard" | "poll" | "webhook" | "runninghub" | "legacy"; config: Record<string, unknown>; enabled: boolean; expectedRevision?: number }
 
 function requireSuperAdmin(actor: AuthUser) {
@@ -77,7 +77,7 @@ export async function createRuntimeModel(actor: AuthUser, input: ModelInput, con
     if (!(await trx("o_providerRuntimeProfile").where({ providerId }).first())) throw new ProviderRuntimeAdminError(422, "PROVIDER_NOT_FOUND", "Provider 不存在");
     if (await trx("o_providerModelProfile").where({ providerId, modelId }).first()) throw new ProviderRuntimeAdminError(409, "MODEL_CONFLICT", "模型已存在");
     const timestamp = Date.now();
-    await trx("o_providerModelProfile").insert({ providerId, modelId, displayName: input.displayName.trim(), capability: input.capability, executionMode: input.executionMode, inputProfileJson: "{}", parameterSchemaJson: JSON.stringify(input.parameterSchema ?? {}), outputMappingJson: "{}", enabled: input.enabled ? 1 : 0, revision: 1, createdAt: timestamp, updatedAt: timestamp });
+    await trx("o_providerModelProfile").insert({ providerId, modelId, displayName: input.displayName.trim(), capability: input.capability, executionMode: input.executionMode, inputProfileJson: JSON.stringify(input.inputProfile ?? {}), parameterSchemaJson: JSON.stringify(input.parameterSchema ?? {}), outputMappingJson: JSON.stringify(input.outputMapping ?? {}), enabled: input.enabled ? 1 : 0, revision: 1, createdAt: timestamp, updatedAt: timestamp });
     await audit(actor, "admin.provider_runtime.model.create", "provider_model", `${providerId}:${modelId}`, { capability: input.capability, executionMode: input.executionMode }, trx);
     return { providerId, modelId, revision: 1 };
   });
@@ -92,6 +92,8 @@ export async function updateRuntimeModel(actor: AuthUser, providerIdRaw: string,
     const update: Record<string, unknown> = { revision: expectedRevision + 1, updatedAt: Date.now() };
     for (const field of ["displayName", "capability", "executionMode"] as const) if (patch[field] !== undefined) update[field] = String(patch[field]).trim();
     if (patch.parameterSchema !== undefined) update.parameterSchemaJson = JSON.stringify(patch.parameterSchema);
+    if (patch.inputProfile !== undefined) update.inputProfileJson = JSON.stringify(patch.inputProfile);
+    if (patch.outputMapping !== undefined) update.outputMappingJson = JSON.stringify(patch.outputMapping);
     if (patch.enabled !== undefined) update.enabled = patch.enabled ? 1 : 0;
     if (await trx("o_providerModelProfile").where({ providerId, modelId, revision: expectedRevision }).update(update) !== 1) throw new ProviderRuntimeAdminError(409, "MODEL_REVISION_CONFLICT", "模型配置已被更新");
     await audit(actor, "admin.provider_runtime.model.update", "provider_model", `${providerId}:${modelId}`, { expectedRevision, changedFields: Object.keys(patch).sort().join(",") }, trx);
@@ -99,19 +101,21 @@ export async function updateRuntimeModel(actor: AuthUser, providerIdRaw: string,
   });
 }
 
-export async function listRuntimeModels(actor: AuthUser, input: { page?: number; pageSize?: number; query?: string; capability?: string; enabled?: boolean; executionMode?: string } = {}, connection: Knex = db) {
+export async function listRuntimeModels(actor: AuthUser, input: { page?: number; pageSize?: number; providerId?: string; query?: string; capability?: string; enabled?: boolean; executionMode?: string } = {}, connection: Knex = db) {
   requireAdmin(actor);
   const page = input.page ?? 1, pageSize = input.pageSize ?? 20;
   if (!Number.isInteger(page) || page < 1 || !Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) throw new ProviderRuntimeAdminError(422, "PAGINATION_INVALID", "分页参数无效");
   const apply = (query: Knex.QueryBuilder) => {
+    if (input.providerId) query.where({ providerId: input.providerId });
     if (input.query) query.where((builder) => builder.whereLike("modelId", `%${input.query}%`).orWhereLike("displayName", `%${input.query}%`).orWhereLike("providerId", `%${input.query}%`));
     if (input.capability) query.where({ capability: input.capability });
     if (input.enabled !== undefined) query.where({ enabled: input.enabled ? 1 : 0 });
     if (input.executionMode) query.where({ executionMode: input.executionMode });
     return query;
   };
-  const [{ count }, rows] = await Promise.all([apply(connection("o_providerModelProfile").clone()).count({ count: "id" }).first() as any, apply(connection("o_providerModelProfile").clone()).select("providerId", "modelId", "displayName", "capability", "executionMode", "enabled", "revision").orderBy(["providerId", "modelId"]).limit(pageSize).offset((page - 1) * pageSize)]);
-  return { page, pageSize, total: Number(count), items: rows.map((row: Record<string, unknown>) => ({ ...row, enabled: Boolean(row.enabled) })) };
+  const [{ count }, rows] = await Promise.all([apply(connection("o_providerModelProfile").clone()).count({ count: "id" }).first() as any, apply(connection("o_providerModelProfile").clone()).select("providerId", "modelId", "displayName", "capability", "executionMode", "inputProfileJson", "parameterSchemaJson", "outputMappingJson", "enabled", "revision").orderBy(["providerId", "modelId"]).limit(pageSize).offset((page - 1) * pageSize)]);
+  const parse = (value: unknown) => { try { return JSON.parse(typeof value === "string" ? value : "{}"); } catch { return {}; } };
+  return { page, pageSize, total: Number(count), items: rows.map((row: any) => ({ providerId: row.providerId, modelId: row.modelId, displayName: row.displayName, capability: row.capability, executionMode: row.executionMode, inputProfile: parse(row.inputProfileJson), parameterSchema: parse(row.parameterSchemaJson), outputMapping: parse(row.outputMappingJson), enabled: Boolean(row.enabled), revision: Number(row.revision) })) };
 }
 
 export async function listRuntimeProviders(actor: AuthUser, connection: Knex = db) {
@@ -181,6 +185,21 @@ export async function upsertRuntimeProtocol(actor: AuthUser, input: ProtocolInpu
     await audit(actor, "admin.provider_runtime.protocol.upsert", "provider_protocol", providerId, { protocolType: input.protocolType, revision: row.revision }, trx);
     return { providerId, revision: row.revision };
   });
+}
+
+function sanitizeProtocolConfig(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeProtocolConfig);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).filter(([key]) => !/(credential|secret|api.?key|token|password|authorization)/i.test(key)).map(([key, item]) => [key, sanitizeProtocolConfig(item)]));
+}
+
+export async function getRuntimeProtocol(actor: AuthUser, providerId: string, connection: Knex = db) {
+  requireAdmin(actor);
+  const row = await connection("o_providerProtocolProfile").where({ providerId }).first();
+  if (!row) return null;
+  let config: unknown = {};
+  try { config = JSON.parse(row.configJson ?? "{}"); } catch { config = {}; }
+  return { providerId, protocolType: row.protocolType, config: sanitizeProtocolConfig(config), enabled: Boolean(row.enabled), revision: Number(row.revision) };
 }
 
 export async function runRuntimeTest(actor: AuthUser, input: { providerId: string; modelId?: string; testType: "connection" | "generation"; confirmBillable?: boolean }, executor: () => Promise<unknown>, connection: Knex = db) {

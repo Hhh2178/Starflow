@@ -9,6 +9,7 @@ import { jsonSchema, tool } from "ai";
 import { z } from "zod";
 import { executeQueuedAgent } from "@/services/agentQueue";
 import { normalizeTextUsage } from "@/services/generationMetering";
+import { invokeProviderText } from "@/services/providerRuntime/productionText";
 
 type ExecutorConnection = Knex | Knex.Transaction;
 
@@ -451,7 +452,7 @@ export async function executeCoreTextGeneration(
     readFile: overrides.readFile ?? ((filePath) => fs.readFile(filePath, "utf-8")),
     getArtPrompt: overrides.getArtPrompt ?? ((styleName, source, fileName) => u.getArtPrompt(styleName, source, fileName)),
     getImageBase64: overrides.getImageBase64 ?? ((imagePath) => u.oss.getImageBase64(imagePath)),
-    invokeText: overrides.invokeText ?? ((model, input) => u.Ai.Text(model).invoke(input as any)),
+    invokeText: overrides.invokeText ?? ((model, input) => invokeProviderText(model, input)),
   };
 
   if (payload.operation === "novel_events") return executeNovelEvents(payload, dependencies.connection);

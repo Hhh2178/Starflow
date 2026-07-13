@@ -127,6 +127,13 @@ export async function applyControlledMigration(input: {
     const current = await trx("o_providerRuntimeProfile").where({ providerId: input.providerId }).first();
     if (!current) throw new ProviderMigrationError("PROVIDER_NOT_FOUND", "Provider 不存在");
     assertControlledTransition({ providerId: input.providerId, from: current.migrationState, to: input.to, evidence: input.evidence });
+    if (input.to === "native") {
+      const [model, protocol] = await Promise.all([
+        trx("o_providerModelProfile").where({ providerId: input.providerId, enabled: 1 }).first(),
+        trx("o_providerProtocolProfile").where({ providerId: input.providerId, enabled: 1 }).first(),
+      ]);
+      if (!model || !protocol) throw new ProviderMigrationError("NATIVE_RUNTIME_NOT_READY", "Native Runtime 需要至少一个已启用模型和协议配置");
+    }
     const updated = await trx("o_providerRuntimeProfile").where({ providerId: input.providerId, revision: input.expectedRevision }).update({
       migrationState: input.to,
       adapterId: input.to === "legacy" ? "legacy" : "runtime-kit",

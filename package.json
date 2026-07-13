@@ -48,6 +48,7 @@
     "test:r3v": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3v-provider-runtime-admin.test.ts",
     "test:r3w": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx --test src/tests/r3w-provider-migration.test.ts",
     "validate:runninghub": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx scripts/validateRunningHubRuntime.ts",
+    "validate:mimo": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=prod tsx scripts/validateMimoRuntime.ts",
     "validate:migrations": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=prod tsx scripts/migrateProviderRuntime.ts",
     "seed:acceptance": "cross-env NODE_ENV=dev tsx scripts/seedAcceptance.ts",
     "start:acceptance": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx scripts/startBrowserAcceptance.ts",

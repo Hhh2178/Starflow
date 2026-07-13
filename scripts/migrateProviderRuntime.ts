@@ -3,6 +3,7 @@ import path from "node:path";
 import knex from "knex";
 import getPath from "@/utils/getPath";
 import { applyControlledMigration, type MigrationEvidence, type MigrationState } from "@/services/providerRuntime/migrationService";
+import { prepareMimoRuntimeProfiles } from "@/services/providerRuntime/migrationPreparation";
 
 const databasePath = process.env.STARS_DATABASE_FILE?.trim()
   ? path.resolve(process.env.STARS_DATABASE_FILE.trim())
@@ -46,15 +47,19 @@ async function main() {
   if (!providerId && !targetRaw) return validateCurrentState();
   if (!providerId || !targetRaw) throw new Error("--provider and --to are required together");
   if (process.env.PROVIDER_MIGRATION_APPLY !== "1") throw new Error("set PROVIDER_MIGRATION_APPLY=1 for an explicit state change");
+  const target = migrationState(targetRaw);
   const current = await db("o_providerRuntimeProfile").where({ providerId }).first();
   if (!current) throw new Error("Provider not found");
+  const prepared = providerId === "mimo" && target === "shadow"
+    ? await prepareMimoRuntimeProfiles(db, process.env.MIMO_VALIDATION_MODEL?.trim() || "mimo-v2.5")
+    : undefined;
   const actor = await db("o_user").where({ role: "super_admin" }).orderBy("id").first();
   if (!actor) throw new Error("Super Admin actor not found");
   const result = await applyControlledMigration({
     actor: { id: actor.id, name: actor.name, role: "super_admin", groupId: null },
-    providerId, expectedRevision: current.revision, to: migrationState(targetRaw), evidence: await evidence(),
+    providerId, expectedRevision: current.revision, to: target, evidence: await evidence(),
   }, db);
-  console.log(JSON.stringify({ ok: true, providerId: result.providerId, from: result.from, to: result.to, revision: result.revision }));
+  console.log(JSON.stringify({ ok: true, providerId: result.providerId, from: result.from, to: result.to, revision: result.revision, ...(prepared ? { prepared } : {}) }));
 }
 
 main().then(async () => { await db.destroy(); }, async (cause) => {

@@ -72,7 +72,7 @@ export async function buildRuntimeKitRegistry(input: RuntimeKitProfileInput) {
         id: provider.providerId,
         name: provider.displayName,
         baseUrl: String(protocol?.config.baseUrl ?? ""),
-        protocol: String(protocol?.protocolType ?? "custom") as any,
+        protocol: String(protocol?.protocolType === "standard" ? "openai" : protocol?.protocolType ?? "custom") as any,
         enabled: provider.enabled,
         note: `migration:${provider.migrationState};adapter:${provider.adapterId}`,
       };
@@ -128,7 +128,22 @@ function safeEvent(event: any): Record<string, unknown> {
 function normalizeKitResult(raw: any, request: ProviderExecutionRequest, adapterId: string): ProviderExecutionResult {
   const output = raw.outputs?.[0];
   const diagnostic = { adapterId, providerId: request.providerId, modelId: request.modelId };
-  if (request.capability === "text") return { kind: "text", data: { text: String(output?.text ?? "") }, usage: raw.usage, taskId: raw.taskId, diagnostic };
+  if (request.capability === "text") {
+    const message = raw.raw?.choices?.[0]?.message;
+    const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls.flatMap((call: any) => {
+      const id = String(call?.id ?? "").trim();
+      const name = String(call?.function?.name ?? "").trim();
+      if (!id || !name) return [];
+      try {
+        const args = JSON.parse(String(call?.function?.arguments ?? "{}"));
+        if (!args || typeof args !== "object" || Array.isArray(args)) return [];
+        return [{ id, name, arguments: args }];
+      } catch {
+        return [];
+      }
+    }) : [];
+    return { kind: "text", data: { text: String(output?.text ?? ""), ...(toolCalls.length > 0 ? { toolCalls } : {}) }, usage: raw.usage, taskId: raw.taskId, diagnostic };
+  }
   if (request.capability === "json") return { kind: "json", data: output?.data ?? raw.raw, taskId: raw.taskId, usage: raw.usage, diagnostic };
   const value = String(output?.url ?? output?.text ?? "");
   return { kind: request.capability, data: { sourceType: /^https?:\/\//i.test(value) ? "url" : "base64", value }, taskId: raw.taskId, usage: raw.usage, diagnostic };

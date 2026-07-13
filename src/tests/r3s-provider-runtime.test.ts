@@ -339,6 +339,24 @@ async function testRuntimeKitOpenAIExecution(): Promise<void> {
   );
 }
 
+async function testRuntimeKitOpenAIToolCallNormalization(): Promise<void> {
+  const adapter = await createStarsRuntimeKitAdapter({
+    profiles: validRuntimeKitProfiles(),
+    clients: {
+      "native-a": {
+        request: async () => ({}),
+        createImage: async () => ({}),
+        createChatCompletion: async () => ({
+          choices: [{ message: { content: "", tool_calls: [{ id: "call-1", type: "function", function: { name: "record", arguments: "{\"value\":\"ok\"}" } }] } }],
+          usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+        }),
+      },
+    },
+  });
+  const result = await adapter.execute({ providerId: "native-a", modelId: "chat-a", capability: "text", input: { prompt: "tool", messages: [] }, timeoutMs: 1000 });
+  assert.deepEqual(result.data, { text: "", toolCalls: [{ id: "call-1", name: "record", arguments: { value: "ok" } }] });
+}
+
 async function testMigrationRouting(): Promise<void> {
   const calls: string[] = [];
   const registry = new ProviderRuntimeRegistry();
@@ -374,6 +392,7 @@ async function main(): Promise<void> {
   await testRuntimeGateway();
   await testRuntimeKitRegistryMapping();
   await testRuntimeKitOpenAIExecution();
+  await testRuntimeKitOpenAIToolCallNormalization();
   await testMigrationRouting();
   console.log("R3S provider runtime profile tests passed");
 }

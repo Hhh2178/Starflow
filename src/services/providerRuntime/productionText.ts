@@ -29,6 +29,7 @@ export interface ProviderTextRuntimeDependencies {
   resolveRoute(providerId: string, modelId: string): Promise<ProviderRouteResolution>;
   legacyInvoke(model: `${string}:${string}`, input: ProviderTextInvocationInput): Promise<ProviderTextInvocationResult>;
   nativeExecute(request: ProviderExecutionRequest): Promise<ProviderExecutionResult>;
+  prepareNativeRequest?(request: ProviderExecutionRequest, route: ProviderRouteResolution): Promise<ProviderExecutionRequest>;
 }
 
 interface ExecutionEnvelope {
@@ -147,6 +148,7 @@ export function createProviderTextRuntime(dependencies: ProviderTextRuntimeDepen
   registry.register(nativeAdapter);
   const gateway = new ProviderRuntimeGateway(registry, {
     resolve: (request) => dependencies.resolveRoute(request.providerId, request.modelId),
+    prepareNativeRequest: dependencies.prepareNativeRequest,
   });
 
   async function invoke(model: string, input: ProviderTextInvocationInput): Promise<ProviderTextInvocationResult> {
@@ -262,8 +264,8 @@ export function createConfiguredProviderTextRuntime(options: ConfiguredProviderT
       const client = await (options.createClient ?? defaultClient)({ baseUrl, apiKey });
       const adapter = await createStarsRuntimeKitAdapter({
         profiles: {
-          providers: [{ providerId: String(provider.providerId), displayName: String(provider.displayName), enabled: Boolean(provider.enabled), migrationState: provider.migrationState, adapterId: String(provider.adapterId) }],
-          models: [{ providerId: String(model.providerId), modelId: String(model.modelId), displayName: String(model.displayName), capability: model.capability, parameterSchema: objectJson(model.parameterSchemaJson), enabled: Boolean(model.enabled) }],
+          providers: [{ providerId: String(provider.providerId), displayName: String(provider.displayName), enabled: Boolean(provider.enabled), migrationState: provider.migrationState, adapterId: String(provider.adapterId), advancedConfig: objectJson(provider.advancedConfigJson) }],
+          models: [{ providerId: String(model.providerId), modelId: String(model.modelId), displayName: String(model.displayName), capability: model.capability, parameterSchema: objectJson(model.parameterSchemaJson), inputCapabilities: objectJson(model.inputCapabilitiesJson), advancedConfig: objectJson(model.advancedConfigJson), protocolOverride: model.protocolOverride ?? null, enabled: Boolean(model.enabled) }],
           protocols: [{ providerId: String(protocol.providerId), protocolType: String(protocol.protocolType), config: protocolConfig, enabled: Boolean(protocol.enabled) }],
         },
         clients: { [request.providerId]: client },

@@ -8,6 +8,7 @@ export interface ProviderRouteResolution {
 
 export interface ProviderRoutingOptions {
   resolve(request: ProviderExecutionRequest): Promise<ProviderRouteResolution>;
+  prepareNativeRequest?(request: ProviderExecutionRequest, route: ProviderRouteResolution): Promise<ProviderExecutionRequest>;
   onShadowDiagnostic?(diagnostic: { ok: boolean; adapterId: string; resultKind?: string; taskId?: string; errorCode?: string }): void | Promise<void>;
 }
 
@@ -20,7 +21,8 @@ export class ProviderRuntimeGateway {
       const legacy = this.requireAdapter("legacy", request);
       if (route.migrationState === "legacy") return legacy.execute(request);
       if (route.migrationState === "shadow") return legacy.execute(request);
-      return this.requireAdapter(route.nativeAdapterId, request).execute(request);
+      const nativeRequest = this.routing.prepareNativeRequest ? await this.routing.prepareNativeRequest(request, route) : request;
+      return this.requireAdapter(route.nativeAdapterId, nativeRequest).execute(nativeRequest);
     }
     const adapter = await this.registry.find(request);
     if (!adapter) {

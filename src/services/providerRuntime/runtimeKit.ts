@@ -3,6 +3,8 @@ import type {
   ValidationIssue,
 } from "aigc-provider-runtime-kit";
 import { ProviderRuntimeError, type ProviderExecutionRequest, type ProviderExecutionResult, type ProviderRuntimeAdapter } from "./contracts";
+import { AdvancedConfigError, composeRuntimeConfig, type AdvancedConfig } from "./advancedConfig";
+import { ModelCapabilityError, normalizeInputCapabilities, type ModelProtocolTemplate } from "./modelCapabilities";
 
 type MigrationState = "legacy" | "shadow" | "native";
 
@@ -12,6 +14,7 @@ export interface RuntimeKitProviderProfile {
   enabled: boolean;
   migrationState: MigrationState;
   adapterId: string;
+  advancedConfig?: Record<string, unknown>;
 }
 
 export interface RuntimeKitProtocolProfile {
@@ -27,6 +30,9 @@ export interface RuntimeKitModelProfile {
   displayName: string;
   capability: "text" | "image" | "video" | "audio";
   parameterSchema: Record<string, unknown>;
+  inputCapabilities?: Record<string, unknown>;
+  advancedConfig?: Record<string, unknown>;
+  protocolOverride?: ModelProtocolTemplate | null;
   enabled: boolean;
 }
 
@@ -34,6 +40,70 @@ export interface RuntimeKitProfileInput {
   providers: RuntimeKitProviderProfile[];
   protocols: RuntimeKitProtocolProfile[];
   models: RuntimeKitModelProfile[];
+}
+
+export interface RuntimeKitCompositionResult {
+  input: Record<string, unknown>;
+  config: AdvancedConfig;
+  protocolTemplate: ModelProtocolTemplate;
+}
+
+function plainObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function protocolTemplate(protocol: RuntimeKitProtocolProfile, model: RuntimeKitModelProfile): ModelProtocolTemplate {
+  const configured = String(model.protocolOverride ?? protocol.config.modelProtocolTemplate ?? "");
+  const supported = new Set<ModelProtocolTemplate>(["sync_inline_result", "async_task_poll_result", "async_task_poll_then_final_lookup", "webhook_callback", "runninghub_app", "runninghub_workflow", "legacy_adapter"]);
+  if (supported.has(configured as ModelProtocolTemplate)) return configured as ModelProtocolTemplate;
+  return ({ standard: "sync_inline_result", poll: "async_task_poll_result", webhook: "webhook_callback", runninghub: "runninghub_app", legacy: "legacy_adapter" } as Record<string, ModelProtocolTemplate>)[protocol.protocolType] ?? "sync_inline_result";
+}
+
+function protocolAdvancedConfig(template: ModelProtocolTemplate, config: Record<string, any>): AdvancedConfig {
+  const request: Record<string, unknown> = {};
+  if (String(config.submitPath ?? "").trim()) request.path = String(config.submitPath).trim();
+  if (String(config.requestMethod ?? "").trim()) request.method = String(config.requestMethod).trim().toUpperCase();
+  const result: AdvancedConfig = Object.keys(request).length > 0 ? { request } : {};
+  if (["async_task_poll_result", "async_task_poll_then_final_lookup"].includes(template)) {
+    result.polling = {
+      ...(String(config.statusPath ?? "").trim() ? { path: String(config.statusPath).trim() } : {}),
+      intervalMs: Number(config.pollIntervalMs ?? 2000),
+      timeoutMs: Number(config.pollTimeoutMs ?? 120000),
+    };
+  }
+  if (template === "async_task_poll_then_final_lookup" && String(config.resultPath ?? "").trim()) result.finalLookup = { path: String(config.resultPath).trim() };
+  return result;
+}
+
+export function composeRuntimeKitInput(input: {
+  request: ProviderExecutionRequest;
+  provider: RuntimeKitProviderProfile;
+  model: RuntimeKitModelProfile;
+  protocol: RuntimeKitProtocolProfile;
+}): RuntimeKitCompositionResult {
+  const rawInput = plainObject(input.request.input);
+  const task = rawInput.parameters === undefined ? {} : plainObject(rawInput.parameters);
+  if (rawInput.parameters !== undefined && (typeof rawInput.parameters !== "object" || rawInput.parameters === null || Array.isArray(rawInput.parameters))) throw new ProviderRuntimeError("MODEL_PARAMETERS_INVALID", "invalid_request", "模型参数必须是 JSON 对象");
+  const capabilities = normalizeInputCapabilities(input.model.capability, input.model.inputCapabilities ?? {});
+  if (input.request.capability === "video") {
+    const frameMode = rawInput.frameMode === undefined ? "" : String(rawInput.frameMode);
+    if (frameMode && !capabilities.frameModes.includes(frameMode as any)) throw new ProviderRuntimeError("VIDEO_FRAME_MODE_UNSUPPORTED", "invalid_request", `不支持的视频帧模式：${frameMode}`);
+    const references = Array.isArray(rawInput.imageReferences) ? rawInput.imageReferences : [];
+    if (references.length > 0 && !capabilities.imageReference.enabled) throw new ProviderRuntimeError("IMAGE_REFERENCE_UNSUPPORTED", "invalid_request", "当前模型不支持参考图");
+    if (capabilities.imageReference.enabled && (references.length < capabilities.imageReference.min || references.length > capabilities.imageReference.max)) throw new ProviderRuntimeError("IMAGE_REFERENCE_COUNT_INVALID", "invalid_request", "参考图数量超出模型允许范围");
+  }
+  const selectedTemplate = protocolTemplate(input.protocol, input.model);
+  const config = composeRuntimeConfig({
+    template: protocolAdvancedConfig(selectedTemplate, input.protocol.config),
+    provider: input.provider.advancedConfig ?? {},
+    model: input.model.advancedConfig ?? {},
+    task,
+    parameterSchema: input.model.parameterSchema,
+  });
+  const { parameters: _parameters, ...requestInput } = rawInput;
+  const requestConfig = plainObject(config.request);
+  const fixedBody = plainObject(requestConfig.fixedBody);
+  return { input: { ...requestInput, ...fixedBody }, config, protocolTemplate: selectedTemplate };
 }
 
 export class RuntimeKitRegistryError extends Error {
@@ -164,15 +234,24 @@ export async function createStarsRuntimeKitAdapter(options: StarsRuntimeKitAdapt
     supports: ({ providerId, modelId }) => enabledModels.has(`${providerId}:${modelId}`),
     async execute(request) {
       try {
+        const provider = options.profiles.providers.find((item) => item.providerId === request.providerId);
+        const model = options.profiles.models.find((item) => item.providerId === request.providerId && item.modelId === request.modelId);
+        const protocol = options.profiles.protocols.find((item) => item.providerId === request.providerId && item.enabled);
+        if (!provider || !model || !protocol) throw new ProviderRuntimeError("RUNTIME_PROFILE_INCOMPLETE", "configuration", `Runtime profile is incomplete: ${request.providerId}/${request.modelId}`);
+        const composed = composeRuntimeKitInput({ request, provider, model, protocol });
         const result = await runtime.execute({
           providerId: request.providerId,
           modelId: `${request.providerId}:${request.modelId}`,
-          input: (request.input ?? {}) as Record<string, unknown>,
+          input: composed.input,
           signal: request.signal,
           timeoutMs: request.timeoutMs,
         });
         return normalizeKitResult(result, request, "runtime-kit");
       } catch (cause) {
+        if (cause instanceof ProviderRuntimeError) throw cause;
+        if (cause instanceof AdvancedConfigError || cause instanceof ModelCapabilityError) {
+          throw new ProviderRuntimeError("INPUT_INVALID", "invalid_request", cause.message, cause);
+        }
         const code = String((cause as { code?: unknown })?.code ?? "RUNTIME_KIT_FAILED");
         const category = code === "EXECUTION_ABORTED" ? (request.signal?.aborted ? "cancelled" : "timeout") : code === "INPUT_INVALID" ? "invalid_request" : "upstream";
         throw new ProviderRuntimeError(code, category, `Runtime Kit execution failed: ${code}`, cause);

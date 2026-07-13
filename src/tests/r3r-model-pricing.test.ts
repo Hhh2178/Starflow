@@ -7,6 +7,7 @@ import { cancelGenerationJob, enqueueGeneration, GenerationQueueError } from "@/
 import { completeGenerationUsage } from "@/services/generationUsage";
 import { adjustQuota } from "@/services/quotaManagement";
 import { normalizeTextUsage } from "@/services/generationMetering";
+import { composeRuntimeKitInput } from "@/services/providerRuntime/runtimeKit";
 import {
   calculateActualCost,
   calculateReservedCost,
@@ -142,6 +143,21 @@ test("pricing formulas use exact CNY arithmetic and Token fallback", () => {
     ),
     0.05,
   );
+});
+
+test("runtime composition cannot change pricing reservation or settlement inputs", () => {
+  const snapshot = pricing({ providerId: "mimo", modelId: "mimo-v2.5", requestPrice: 0.05 });
+  const before = structuredClone(snapshot);
+  const reserved = calculateReservedCost(snapshot, { requests: 1 });
+  composeRuntimeKitInput({
+    request: { providerId: "mimo", modelId: "mimo-v2.5", capability: "text", input: { messages: [], parameters: { temperature: 0.2 } }, timeoutMs: 1000 },
+    provider: { providerId: "mimo", displayName: "MiMo", enabled: true, migrationState: "native", adapterId: "runtime-kit", advancedConfig: { request: { fixedBody: { region: "cn" } } } },
+    model: { providerId: "mimo", modelId: "mimo-v2.5", displayName: "MiMo", capability: "text", parameterSchema: { temperature: { type: "number", min: 0, max: 2 } }, enabled: true },
+    protocol: { providerId: "mimo", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1" }, enabled: true },
+  });
+  assert.deepEqual(snapshot, before);
+  assert.equal(reserved, 0.05);
+  assert.equal(calculateActualCost(snapshot, { requests: 1 }), 0.05);
 });
 
 test("pricing validation accepts zero and rejects incomplete or over-precise prices", () => {

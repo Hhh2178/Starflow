@@ -13,6 +13,7 @@ import { ProviderRuntimeError, type ProviderExecutionRequest } from "@/services/
 import { ProviderRuntimeRegistry } from "@/services/providerRuntime/registry";
 import {
   buildRuntimeKitRegistry,
+  composeRuntimeKitInput,
   createStarsRuntimeKitAdapter,
   RuntimeKitRegistryError,
   type RuntimeKitProfileInput,
@@ -377,10 +378,29 @@ async function testRuntimeGateway(): Promise<void> {
 
 function validRuntimeKitProfiles(): RuntimeKitProfileInput {
   return {
-    providers: [{ providerId: "native-a", displayName: "Native A", enabled: true, migrationState: "native", adapterId: "openai" }],
-    protocols: [{ providerId: "native-a", protocolType: "openai", config: { baseUrl: "https://api.invalid/v1" }, enabled: true }],
-    models: [{ providerId: "native-a", modelId: "chat-a", displayName: "Chat A", capability: "text", parameterSchema: { prompt: { type: "string", required: true } }, enabled: true }],
+    providers: [{ providerId: "native-a", displayName: "Native A", enabled: true, migrationState: "native", adapterId: "openai", advancedConfig: { request: { fixedBody: { region: "cn", shared: "provider" } } } }],
+    protocols: [{ providerId: "native-a", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1", modelProtocolTemplate: "sync_inline_result", submitPath: "/chat/completions" }, enabled: true }],
+    models: [{ providerId: "native-a", modelId: "chat-a", displayName: "Chat A", capability: "text", parameterSchema: { temperature: { type: "number", min: 0, max: 2 } }, inputCapabilities: { prompt: true }, advancedConfig: { request: { fixedBody: { model: "chat-a", shared: "model" } } }, protocolOverride: "sync_inline_result", enabled: true }],
   };
+}
+
+function testRuntimeComposition(): void {
+  const profiles = validRuntimeKitProfiles();
+  const composed = composeRuntimeKitInput({
+    request: { providerId: "native-a", modelId: "chat-a", capability: "text", input: { messages: [{ role: "user", content: "hello" }], parameters: { temperature: 0.4 } }, timeoutMs: 1000 },
+    provider: profiles.providers[0], model: profiles.models[0], protocol: profiles.protocols[0],
+  });
+  assert.deepEqual(composed.input, { messages: [{ role: "user", content: "hello" }], region: "cn", shared: "model", model: "chat-a", temperature: 0.4 });
+  assert.equal(composed.protocolTemplate, "sync_inline_result");
+  assert.equal((composed.config.request as any).path, "/chat/completions");
+  assert.throws(() => composeRuntimeKitInput({
+    request: { providerId: "native-a", modelId: "chat-a", capability: "text", input: { parameters: { unsupported: true } }, timeoutMs: 1000 },
+    provider: profiles.providers[0], model: profiles.models[0], protocol: profiles.protocols[0],
+  }), /未声明参数/);
+
+  const videoModel = { ...profiles.models[0], capability: "video" as const, inputCapabilities: { imageReference: { enabled: true, min: 1, max: 3 }, frameModes: ["first_frame", "first_last_frame"] }, parameterSchema: {} };
+  assert.equal(composeRuntimeKitInput({ request: { providerId: "native-a", modelId: "video-a", capability: "video", input: { frameMode: "first_frame", imageReferences: ["one"] }, timeoutMs: 1000 }, provider: profiles.providers[0], model: videoModel, protocol: profiles.protocols[0] }).input.frameMode, "first_frame");
+  assert.throws(() => composeRuntimeKitInput({ request: { providerId: "native-a", modelId: "video-a", capability: "video", input: { frameMode: "last_frame", imageReferences: ["one"] }, timeoutMs: 1000 }, provider: profiles.providers[0], model: videoModel, protocol: profiles.protocols[0] }), /视频帧模式/);
 }
 
 async function expectRegistryError(input: RuntimeKitProfileInput, issueCode: string): Promise<void> {
@@ -438,6 +458,11 @@ async function testRuntimeKitOpenAIExecution(): Promise<void> {
   assert.deepEqual(result.usage, { inputTokens: 5, outputTokens: 3, totalTokens: 8 });
   assert.equal(calls.length, 1);
   assert.equal(JSON.stringify(diagnostics).includes("sk-runtime-secret"), false);
+  await expectRuntimeError(
+    adapter.execute({ providerId: "native-a", modelId: "chat-a", capability: "text", input: { messages: [], parameters: { unsupported: true } }, timeoutMs: 1000 }),
+    "INPUT_INVALID",
+    "invalid_request",
+  );
 
   const timeoutAdapter = await createStarsRuntimeKitAdapter({
     profiles,
@@ -482,8 +507,10 @@ async function testMigrationRouting(): Promise<void> {
   registry.register({ id: "native", supports: () => true, execute: async () => { calls.push("native"); return result("native", "native"); } });
   let state: "legacy" | "shadow" | "native" = "legacy";
   const shadows: unknown[] = [];
+  let prepared = 0;
   const gateway = new ProviderRuntimeGateway(registry, {
     resolve: async () => ({ migrationState: state, nativeAdapterId: "native" }),
+    prepareNativeRequest: async (value) => { prepared += 1; return { ...value, input: { prepared: true } }; },
     onShadowDiagnostic: async (diagnostic) => { shadows.push(diagnostic); },
   });
   const request: ProviderExecutionRequest = { providerId: "p", modelId: "m", capability: "text", input: {}, timeoutMs: 1000 };
@@ -493,6 +520,7 @@ async function testMigrationRouting(): Promise<void> {
   state = "shadow";
   assert.equal((await gateway.execute(request)).diagnostic.adapterId, "legacy");
   assert.deepEqual(calls, ["legacy", "native", "legacy"]);
+  assert.equal(prepared, 1);
   assert.equal(shadows.length, 0);
 }
 
@@ -508,6 +536,7 @@ async function main(): Promise<void> {
   await testRuntimeV2ColumnMigration();
   testModelCapabilityContracts();
   testAdvancedConfigContracts();
+  testRuntimeComposition();
   await testLegacyAdapterBridge();
   await testRuntimeGateway();
   await testRuntimeKitRegistryMapping();

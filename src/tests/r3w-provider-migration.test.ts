@@ -171,17 +171,18 @@ test("configured production runtime loads versioned profiles and protected crede
   try {
     await db.schema.createTable("o_setting", (table) => { table.string("key").primary(); table.string("value"); });
     await db.schema.createTable("o_agentDeploy", (table) => { table.string("key").primary(); table.string("modelName"); });
-    await db.schema.createTable("o_providerRuntimeProfile", (table) => { table.string("providerId").primary(); table.string("displayName"); table.boolean("enabled"); table.string("migrationState"); table.string("adapterId"); });
-    await db.schema.createTable("o_providerModelProfile", (table) => { table.string("providerId"); table.string("modelId"); table.string("displayName"); table.string("capability"); table.string("parameterSchemaJson"); table.boolean("enabled"); });
+    await db.schema.createTable("o_providerRuntimeProfile", (table) => { table.string("providerId").primary(); table.string("displayName"); table.boolean("enabled"); table.string("migrationState"); table.string("adapterId"); table.text("advancedConfigJson"); });
+    await db.schema.createTable("o_providerModelProfile", (table) => { table.string("providerId"); table.string("modelId"); table.string("displayName"); table.string("capability"); table.string("parameterSchemaJson"); table.text("inputCapabilitiesJson"); table.text("advancedConfigJson"); table.string("protocolOverride"); table.boolean("enabled"); });
     await db.schema.createTable("o_providerProtocolProfile", (table) => { table.string("providerId").primary(); table.string("protocolType"); table.string("configJson"); table.boolean("enabled"); });
     await db.schema.createTable("o_vendorConfig", (table) => { table.string("id").primary(); table.text("inputValues"); });
     await db("o_setting").insert({ key: "agentUseMode", value: "0" });
     await db("o_agentDeploy").insert({ key: "universalAi", modelName: "mimo:mimo-v2.5" });
-    await db("o_providerRuntimeProfile").insert({ providerId: "mimo", displayName: "MiMo", enabled: 1, migrationState: "native", adapterId: "runtime-kit" });
-    await db("o_providerModelProfile").insert({ providerId: "mimo", modelId: "mimo-v2.5", displayName: "MiMo V2.5", capability: "text", parameterSchemaJson: "{}", enabled: 1 });
-    await db("o_providerProtocolProfile").insert({ providerId: "mimo", protocolType: "standard", configJson: JSON.stringify({ baseUrl: "https://api.invalid/v1" }), enabled: 1 });
+    await db("o_providerRuntimeProfile").insert({ providerId: "mimo", displayName: "MiMo", enabled: 1, migrationState: "native", adapterId: "runtime-kit", advancedConfigJson: JSON.stringify({ request: { fixedBody: { region: "cn", shared: "provider" } } }) });
+    await db("o_providerModelProfile").insert({ providerId: "mimo", modelId: "mimo-v2.5", displayName: "MiMo V2.5", capability: "text", parameterSchemaJson: "{}", inputCapabilitiesJson: JSON.stringify({ prompt: true }), advancedConfigJson: JSON.stringify({ request: { fixedBody: { model: "mimo-v2.5", shared: "model" } } }), protocolOverride: "sync_inline_result", enabled: 1 });
+    await db("o_providerProtocolProfile").insert({ providerId: "mimo", protocolType: "standard", configJson: JSON.stringify({ baseUrl: "https://api.invalid/v1", modelProtocolTemplate: "sync_inline_result", submitPath: "/chat/completions" }), enabled: 1 });
     await db("o_vendorConfig").insert({ id: "mimo", inputValues: JSON.stringify({ apiKey: "test-secret", baseUrl: "https://legacy.invalid/v1" }) });
     const clientOptions: Array<{ baseUrl: string; configured: boolean }> = [];
+    const requestBodies: Array<Record<string, unknown>> = [];
     const runtime = createConfiguredProviderTextRuntime({
       connection: db,
       legacyInvoke: async () => ({ text: "legacy" }),
@@ -189,13 +190,14 @@ test("configured production runtime loads versioned profiles and protected crede
         clientOptions.push({ baseUrl: options.baseUrl, configured: Boolean(options.apiKey) });
         return {
           request: async () => ({}), createImage: async () => ({}),
-          createChatCompletion: async () => ({ choices: [{ message: { content: "native" } }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } }),
+          createChatCompletion: async (body) => { requestBodies.push(body); return { choices: [{ message: { content: "native" } }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } }; },
         };
       },
     });
     const response = await runtime.invoke("universalAi", { messages: [{ role: "user", content: "ping" }] });
     assert.equal(response.text, "native");
     assert.deepEqual(clientOptions, [{ baseUrl: "https://api.invalid/v1", configured: true }]);
+    assert.deepEqual(requestBodies[0], { messages: [{ role: "user", content: "ping" }], region: "cn", shared: "model", model: "mimo-v2.5" });
     assert.equal(JSON.stringify(response).includes("test-secret"), false);
   } finally { await db.destroy(); }
 });

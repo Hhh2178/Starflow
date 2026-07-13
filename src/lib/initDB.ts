@@ -477,6 +477,17 @@ export default async (
             value: uuid().slice(0, 8),
           },
           {
+            key: "supportContact",
+            value: JSON.stringify({
+              enabled: false,
+              type: "wechat",
+              title: "联系支持",
+              wechatId: "",
+              qrAssetId: null,
+              description: "",
+            }),
+          },
+          {
             key: "messagesPerSummary",
             value: 10,
           },

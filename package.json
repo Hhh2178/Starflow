@@ -45,6 +45,7 @@
     "test:r3s": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3s-provider-runtime.test.ts",
     "test:r3t": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3t-support-contact.test.ts",
     "test:r3u": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx --test src/tests/r3u-runninghub-runtime.test.ts",
+    "test:r3v": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx src/tests/r3v-provider-runtime-admin.test.ts",
     "validate:runninghub": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx scripts/validateRunningHubRuntime.ts",
     "seed:acceptance": "cross-env NODE_ENV=dev tsx scripts/seedAcceptance.ts",
     "start:acceptance": "cross-env TOONFLOW_NO_AUTOSTART=1 NODE_ENV=dev tsx scripts/startBrowserAcceptance.ts",

@@ -1,4 +1,4 @@
-// @db-hash 1b9ad03ff611553d022b357077df13f7
+// @db-hash 028e3c05b1c6c7f7844a04986ff14e8e
 //该文件由脚本自动生成，请勿手动修改
 
 export interface memories {
@@ -225,6 +225,52 @@ export interface o_prompt {
   'type'?: string | null;
   'useData'?: string | null;
 }
+export interface o_providerModelProfile {
+  'capability': string;
+  'createdAt': number;
+  'displayName': string;
+  'enabled'?: boolean;
+  'executionMode': string;
+  'id'?: number;
+  'inputProfileJson'?: string;
+  'modelId': string;
+  'outputMappingJson'?: string;
+  'parameterSchemaJson'?: string;
+  'providerId': string;
+  'revision'?: number;
+  'updatedAt': number;
+}
+export interface o_providerProtocolProfile {
+  'configJson'?: string;
+  'createdAt': number;
+  'enabled'?: boolean;
+  'id'?: number;
+  'protocolType': string;
+  'providerId': string;
+  'revision'?: number;
+  'updatedAt': number;
+}
+export interface o_providerRuntimeProfile {
+  'adapterId'?: string;
+  'createdAt': number;
+  'displayName': string;
+  'enabled'?: boolean;
+  'id'?: number;
+  'migrationState'?: string;
+  'providerId': string;
+  'revision'?: number;
+  'updatedAt': number;
+}
+export interface o_providerTestRun {
+  'createdAt': number;
+  'durationMs'?: number | null;
+  'errorCode'?: string | null;
+  'id'?: number;
+  'modelId'?: string | null;
+  'providerId': string;
+  'status': string;
+  'testType': string;
+}
 export interface o_quotaAccount {
   'balance'?: number;
   'billingStatus'?: string;
@@ -256,6 +302,22 @@ export interface o_quotaReservation {
   'reservedAmount': number;
   'settledAt'?: number | null;
   'status': string;
+}
+export interface o_runningHubDescriptor {
+  'createdAt': number;
+  'enabled'?: boolean;
+  'id'?: number;
+  'inputMappingJson'?: string;
+  'modelId': string;
+  'outputRuleJson'?: string;
+  'pollingIntervalMs'?: number;
+  'providerId': string;
+  'resourceId': string;
+  'resourceType': string;
+  'revision'?: number;
+  'timeoutMs'?: number;
+  'updatedAt': number;
+  'uploadMappingJson'?: string;
 }
 export interface o_script {
   'content'?: string | null;
@@ -345,8 +407,8 @@ export interface o_user {
   'name'?: string | null;
   'password'?: string | null;
   'passwordHash'?: string | null;
-  'role'?: string | null;
-  'status'?: string | null;
+  'role'?: string;
+  'status'?: string;
   'updatedAt'?: number | null;
 }
 export interface o_vendorConfig {
@@ -399,9 +461,14 @@ export interface DB {
   "o_novel": o_novel;
   "o_project": o_project;
   "o_prompt": o_prompt;
+  "o_providerModelProfile": o_providerModelProfile;
+  "o_providerProtocolProfile": o_providerProtocolProfile;
+  "o_providerRuntimeProfile": o_providerRuntimeProfile;
+  "o_providerTestRun": o_providerTestRun;
   "o_quotaAccount": o_quotaAccount;
   "o_quotaLedger": o_quotaLedger;
   "o_quotaReservation": o_quotaReservation;
+  "o_runningHubDescriptor": o_runningHubDescriptor;
   "o_script": o_script;
   "o_scriptAssets": o_scriptAssets;
   "o_setting": o_setting;

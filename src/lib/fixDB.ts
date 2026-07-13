@@ -5,6 +5,7 @@ import { transform } from "sucrase";
 import rawVendorData from "./vendor.json";
 import { hashPassword } from "@/utils/password";
 import { ensureGenerationQueueOrderingIndex } from "@/lib/generationQueueSchema";
+import { ensureProviderRuntimeSchema } from "@/lib/providerRuntimeSchema";
 
 const vendorData = rawVendorData as Record<string, string>;
 
@@ -375,6 +376,10 @@ export async function migrateGenerationQueue(knex: Knex): Promise<void> {
   }
 }
 
+export async function migrateProviderRuntimeProfiles(knex: Knex): Promise<void> {
+  await ensureProviderRuntimeSchema(knex);
+}
+
 export default async (knex: Knex): Promise<void> => {
   const [{ default: u }, { default: db }] = await Promise.all([import("@/utils"), import("@/utils/db")]);
 
@@ -556,6 +561,8 @@ export default async (knex: Knex): Promise<void> => {
       if (tsCode) await tempOnsert(knex, tsCode, u);
     }
   }
+
+  await migrateProviderRuntimeProfiles(knex);
 
   await dropColumn("o_vendorConfig", "author");
   await dropColumn("o_vendorConfig", "description");

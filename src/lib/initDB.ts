@@ -2,6 +2,7 @@ import { Knex } from "knex";
 import { v4 as uuid } from "uuid";
 import { hashPassword } from "@/utils/password";
 import { addGenerationQueueOrderingIndex } from "@/lib/generationQueueSchema";
+import { providerRuntimeTableSchemas } from "@/lib/providerRuntimeSchema";
 
 interface TableSchema {
   name: string;
@@ -828,6 +829,7 @@ export default async (
         ]);
       },
     },
+    ...providerRuntimeTableSchemas,
     //图片工作流表
     {
       name: "o_imageFlow",

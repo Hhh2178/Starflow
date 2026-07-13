@@ -24,11 +24,29 @@ import {
   probeProviderDraft,
   replaceProviderCredential,
 } from "@/services/providerRuntime/providerCredentials";
+import {
+  fetchProviderModels,
+  importProviderModels,
+  parseDiscoveredModels,
+} from "@/services/providerRuntime/modelDiscovery";
 
 const superAdmin: AuthUser = { id: 1, name: "root", role: "super_admin", groupId: null };
 const admin: AuthUser = { id: 2, name: "admin", role: "admin", groupId: 1 };
 
+function testDiscoveryParsing() {
+  assert.deepEqual(parseDiscoveredModels({ data: [{ id: "vision-chat" }, { id: "gpt-image-2" }, { id: "vision-chat" }] }, "standard"), [
+    { modelId: "gpt-image-2", displayName: "gpt-image-2", suggestedCapability: "image" },
+    { modelId: "vision-chat", displayName: "vision-chat", suggestedCapability: "text" },
+  ]);
+  assert.deepEqual(parseDiscoveredModels({ models: [{ name: "models/gemini-2.5-flash" }, { name: "models/veo-3" }] }, "gemini"), [
+    { modelId: "gemini-2.5-flash", displayName: "gemini-2.5-flash", suggestedCapability: "text" },
+    { modelId: "veo-3", displayName: "veo-3", suggestedCapability: "video" },
+  ]);
+  assert.throws(() => parseDiscoveredModels({}, "runninghub"), /目录|支持/);
+}
+
 async function main() {
+  testDiscoveryParsing();
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
     await initDB(db, false, true);
@@ -70,11 +88,17 @@ async function main() {
     assert.equal(JSON.stringify(draftProbe).includes(draftCredential), false);
     assert.equal(JSON.parse((await db("o_vendorConfig").where({ id: "native-test" }).first()).inputValues).apiKey, testCredential);
 
-    await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "chat-a", displayName: "Chat A", capability: "text", executionMode: "sync", inputProfile: { prompt: true }, parameterSchema: { prompt: { type: "string" } }, outputMapping: { text: "choices.0.message.content" }, enabled: true }, db);
+    await assert.rejects(createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "invalid-tags", displayName: "Invalid Tags", capability: "text", executionMode: "legacy", capabilityTags: ["not-approved"], enabled: false }, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.status === 422 && cause.code === "MODEL_CAPABILITIES_INVALID");
+    await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "chat-a", displayName: "Chat A", capability: "text", executionMode: "sync", inputProfile: { prompt: true }, capabilityTags: ["text_chat", "reasoning"], inputCapabilities: { prompt: true, systemPrompt: true }, parameterSchema: { prompt: { type: "string" } }, advancedConfig: { request: { fixedBody: { stream: false } } }, protocolOverride: "legacy_adapter", outputMapping: { text: "choices.0.message.content" }, enabled: true }, db);
     await createRuntimeModel(superAdmin, { providerId: "native-test", modelId: "image-a", displayName: "Image A", capability: "image", executionMode: "background_poll", enabled: false }, db);
+    await assert.rejects(importProviderModels(admin, "native-test", [{ modelId: "forbidden-model", displayName: "Forbidden", capability: "text" }], db), /SUPER_ADMIN_REQUIRED|超级管理员/);
+    assert.deepEqual(await importProviderModels(superAdmin, "native-test", [
+      { modelId: "chat-a", displayName: "Chat Duplicate", capability: "text" },
+      { modelId: "gpt-image-2", displayName: "GPT Image 2", capability: "image" },
+    ], db), { imported: ["gpt-image-2"], skipped: ["chat-a"] });
     const providers = await listRuntimeProviders(admin, db);
     const runtimeProvider = providers.find((item) => item.providerId === "native-test");
-    assert.equal(runtimeProvider?.modelCount, 2);
+    assert.equal(runtimeProvider?.modelCount, 3);
     assert.equal(runtimeProvider?.note, "用于文本与图像任务");
     assert.deepEqual(runtimeProvider?.advancedConfig, { request: { method: "POST", fixedBody: { region: "cn" } } });
     assert.equal(runtimeProvider?.credential.configured, true);
@@ -85,6 +109,13 @@ async function main() {
     assert.equal(filtered.items[0].displayName, "Chat Updated");
     assert.deepEqual(filtered.items[0].inputProfile, { prompt: true });
     assert.deepEqual(filtered.items[0].outputMapping, { text: "choices.0.message.content" });
+    assert.deepEqual(filtered.items[0].capabilityTags, ["text_chat", "reasoning"]);
+    assert.equal(filtered.items[0].inputCapabilities.systemPrompt, true);
+    assert.deepEqual(filtered.items[0].advancedConfig, { request: { fixedBody: { stream: false } } });
+    assert.equal(filtered.items[0].protocolOverride, "legacy_adapter");
+    const importedModel = (await listRuntimeModels(superAdmin, { providerId: "native-test", query: "gpt-image-2" }, db)).items[0];
+    assert.equal(importedModel.enabled, false);
+    assert.deepEqual(importedModel.capabilityTags, ["image_generation"]);
 
     await upsertRuntimeProtocol(superAdmin, { providerId: "native-test", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1", credentialRef: "secret://provider/native-test" }, enabled: true }, db);
     assert.deepEqual(await getRuntimeProtocol(admin, "native-test", db), { providerId: "native-test", protocolType: "standard", config: { baseUrl: "https://api.invalid/v1" }, enabled: true, revision: 1 });
@@ -92,6 +123,8 @@ async function main() {
     const savedProbe = await probeProviderConnection(superAdmin, "native-test", db, async () => new Response(null, { status: 204 }));
     assert.equal(savedProbe.status, "available");
     assert.equal(JSON.stringify(savedProbe).includes(testCredential), false);
+    const fetched = await fetchProviderModels(superAdmin, "native-test", db, async () => new Response(JSON.stringify({ data: [{ id: "chat-a" }, { id: "new-video-model" }] }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    assert.deepEqual(fetched.map((item) => [item.modelId, item.exists]), [["chat-a", true], ["new-video-model", false]]);
 
     await assert.rejects(runRuntimeTest(superAdmin, { providerId: "native-test", modelId: "chat-a", testType: "generation" }, async () => undefined, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "BILLABLE_CONFIRMATION_REQUIRED");
     await runRuntimeTest(superAdmin, { providerId: "native-test", modelId: "chat-a", testType: "connection" }, async () => undefined, db);

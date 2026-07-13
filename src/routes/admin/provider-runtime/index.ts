@@ -12,11 +12,14 @@ import {
 import {
   clearProviderCredential, getProviderCredentialStatus, probeProviderConnection, probeProviderDraft, replaceProviderCredential,
 } from "@/services/providerRuntime/providerCredentials";
+import { fetchProviderModels, importProviderModels } from "@/services/providerRuntime/modelDiscovery";
 
 const id = z.string().trim().min(1).max(128);
 const advancedConfig = z.record(z.string(), z.unknown());
 const provider = z.strictObject({ providerId: id, displayName: z.string().trim().min(1).max(200), enabled: z.boolean(), migrationState: z.enum(["legacy", "shadow", "native"]), adapterId: id, note: z.string().max(2000).optional(), advancedConfig: advancedConfig.optional() });
-const model = z.strictObject({ providerId: id, modelId: id, displayName: z.string().trim().min(1).max(200), capability: z.enum(["text", "image", "video", "audio", "json"]), executionMode: z.enum(["sync", "background_poll", "webhook", "runninghub", "legacy"]), inputProfile: z.record(z.string(), z.unknown()).optional(), parameterSchema: z.record(z.string(), z.unknown()).optional(), outputMapping: z.record(z.string(), z.unknown()).optional(), enabled: z.boolean() });
+const capability = z.enum(["text", "image", "video", "audio", "json"]);
+const protocolOverride = z.enum(["sync_inline_result", "async_task_poll_result", "async_task_poll_then_final_lookup", "webhook_callback", "runninghub_app", "runninghub_workflow", "legacy_adapter"]);
+const model = z.strictObject({ providerId: id, modelId: id, displayName: z.string().trim().min(1).max(200), capability, executionMode: z.enum(["sync", "background_poll", "webhook", "runninghub", "legacy"]), inputProfile: z.record(z.string(), z.unknown()).optional(), capabilityTags: z.array(z.string()).optional(), inputCapabilities: z.record(z.string(), z.unknown()).optional(), parameterSchema: z.record(z.string(), z.unknown()).optional(), advancedConfig: advancedConfig.optional(), protocolOverride: protocolOverride.nullable().optional(), outputMapping: z.record(z.string(), z.unknown()).optional(), enabled: z.boolean() });
 const protocol = z.strictObject({ providerId: id, protocolType: z.enum(["standard", "poll", "webhook", "runninghub", "legacy"]), config: z.record(z.string(), z.unknown()), enabled: z.boolean(), expectedRevision: z.number().int().positive().optional() });
 
 function sendFailure(res: express.Response, cause: unknown) {
@@ -49,6 +52,11 @@ export function createProviderRuntimeAdminRouter() {
     try { return res.send(success(await probeProviderDraft(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); }
   });
   router.post("/providers/:providerId/probe", async (req, res) => { try { return res.send(success(await probeProviderConnection(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
+  router.post("/providers/:providerId/fetch-models", async (req, res) => { try { return res.send(success(await fetchProviderModels(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
+  router.post("/providers/:providerId/import-models", async (req, res) => {
+    const parsed = z.strictObject({ models: z.array(z.strictObject({ modelId: id, displayName: z.string().trim().min(1).max(200), capability })).min(1).max(200) }).safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" }));
+    try { return res.send(success(await importProviderModels(getAuthUser(req), req.params.providerId, parsed.data.models))); } catch (cause) { return sendFailure(res, cause); }
+  });
   router.post("/models", async (req, res) => { const parsed = model.safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" })); try { return res.send(success(await createRuntimeModel(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); } });
   router.patch("/models/:providerId/:modelId", async (req, res) => {
     const parsed = model.omit({ providerId: true, modelId: true }).partial().extend({ expectedRevision: z.number().int().positive() }).safeParse(req.body);

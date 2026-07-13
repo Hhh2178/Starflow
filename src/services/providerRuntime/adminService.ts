@@ -6,6 +6,10 @@ import { ProviderProfileError } from "./profileService";
 import { assertControlledTransition } from "./migrationService";
 import { AdvancedConfigError, validateAdvancedConfig } from "./advancedConfig";
 import { credentialStatusFromInputValues } from "./providerCredentials";
+import {
+  MODEL_PROTOCOL_TEMPLATES, ModelCapabilityError, capabilityTemplate, normalizeCapabilityTags, normalizeInputCapabilities,
+  type ModelProtocolTemplate,
+} from "./modelCapabilities";
 
 export class ProviderRuntimeAdminError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
@@ -15,7 +19,7 @@ export class ProviderRuntimeAdminError extends Error {
 }
 
 export interface ProviderInput { providerId: string; displayName: string; enabled: boolean; migrationState: "legacy" | "shadow" | "native"; adapterId: string; note?: string; advancedConfig?: Record<string, unknown> }
-export interface ModelInput { providerId: string; modelId: string; displayName: string; capability: "text" | "image" | "video" | "audio" | "json"; executionMode: "sync" | "background_poll" | "webhook" | "runninghub" | "legacy"; inputProfile?: Record<string, unknown>; parameterSchema?: Record<string, unknown>; outputMapping?: Record<string, unknown>; enabled: boolean }
+export interface ModelInput { providerId: string; modelId: string; displayName: string; capability: "text" | "image" | "video" | "audio" | "json"; executionMode: "sync" | "background_poll" | "webhook" | "runninghub" | "legacy"; inputProfile?: Record<string, unknown>; capabilityTags?: string[]; inputCapabilities?: Record<string, unknown>; parameterSchema?: Record<string, unknown>; advancedConfig?: Record<string, unknown>; protocolOverride?: ModelProtocolTemplate | null; outputMapping?: Record<string, unknown>; enabled: boolean }
 export interface ProtocolInput { providerId: string; protocolType: "standard" | "poll" | "webhook" | "runninghub" | "legacy"; config: Record<string, unknown>; enabled: boolean; expectedRevision?: number }
 
 function requireSuperAdmin(actor: AuthUser) {
@@ -43,6 +47,22 @@ function safeAdvancedConfig(config: Record<string, unknown>) {
     return validateAdvancedConfig(config);
   } catch (cause) {
     if (cause instanceof AdvancedConfigError) throw new ProviderRuntimeAdminError(422, "ADVANCED_CONFIG_INVALID", cause.message);
+    throw cause;
+  }
+}
+
+function safeCapabilityTags(value: unknown) {
+  try { return normalizeCapabilityTags(value); }
+  catch (cause) {
+    if (cause instanceof ModelCapabilityError) throw new ProviderRuntimeAdminError(422, "MODEL_CAPABILITIES_INVALID", cause.message);
+    throw cause;
+  }
+}
+
+function safeInputCapabilities(capability: ModelInput["capability"], value: unknown) {
+  try { return normalizeInputCapabilities(capability, value); }
+  catch (cause) {
+    if (cause instanceof ModelCapabilityError) throw new ProviderRuntimeAdminError(422, "MODEL_CAPABILITIES_INVALID", cause.message);
     throw cause;
   }
 }
@@ -106,7 +126,12 @@ export async function createRuntimeModel(actor: AuthUser, input: ModelInput, con
     if (!(await trx("o_providerRuntimeProfile").where({ providerId }).first())) throw new ProviderRuntimeAdminError(422, "PROVIDER_NOT_FOUND", "Provider 不存在");
     if (await trx("o_providerModelProfile").where({ providerId, modelId }).first()) throw new ProviderRuntimeAdminError(409, "MODEL_CONFLICT", "模型已存在");
     const timestamp = Date.now();
-    await trx("o_providerModelProfile").insert({ providerId, modelId, displayName: input.displayName.trim(), capability: input.capability, executionMode: input.executionMode, inputProfileJson: JSON.stringify(input.inputProfile ?? {}), parameterSchemaJson: JSON.stringify(input.parameterSchema ?? {}), outputMappingJson: JSON.stringify(input.outputMapping ?? {}), enabled: input.enabled ? 1 : 0, revision: 1, createdAt: timestamp, updatedAt: timestamp });
+    const template = capabilityTemplate(input.capability);
+    const capabilityTags = safeCapabilityTags(input.capabilityTags ?? template.capabilityTags);
+    const inputCapabilities = safeInputCapabilities(input.capability, input.inputCapabilities ?? template.inputCapabilities);
+    const advancedConfig = safeAdvancedConfig(input.advancedConfig ?? {});
+    if (input.protocolOverride != null && !MODEL_PROTOCOL_TEMPLATES.includes(input.protocolOverride)) throw new ProviderRuntimeAdminError(422, "MODEL_PROTOCOL_INVALID", "模型协议模板无效");
+    await trx("o_providerModelProfile").insert({ providerId, modelId, displayName: input.displayName.trim(), capability: input.capability, executionMode: input.executionMode, inputProfileJson: JSON.stringify(input.inputProfile ?? {}), capabilityTagsJson: JSON.stringify(capabilityTags), inputCapabilitiesJson: JSON.stringify(inputCapabilities), parameterSchemaJson: JSON.stringify(input.parameterSchema ?? template.parameterSchema), advancedConfigJson: JSON.stringify(advancedConfig), protocolOverride: input.protocolOverride ?? null, outputMappingJson: JSON.stringify(input.outputMapping ?? {}), enabled: input.enabled ? 1 : 0, revision: 1, createdAt: timestamp, updatedAt: timestamp });
     await audit(actor, "admin.provider_runtime.model.create", "provider_model", `${providerId}:${modelId}`, { capability: input.capability, executionMode: input.executionMode }, trx);
     return { providerId, modelId, revision: 1 };
   });
@@ -122,7 +147,14 @@ export async function updateRuntimeModel(actor: AuthUser, providerIdRaw: string,
     for (const field of ["displayName", "capability", "executionMode"] as const) if (patch[field] !== undefined) update[field] = String(patch[field]).trim();
     if (patch.parameterSchema !== undefined) update.parameterSchemaJson = JSON.stringify(patch.parameterSchema);
     if (patch.inputProfile !== undefined) update.inputProfileJson = JSON.stringify(patch.inputProfile);
+    if (patch.capabilityTags !== undefined) update.capabilityTagsJson = JSON.stringify(safeCapabilityTags(patch.capabilityTags));
+    if (patch.inputCapabilities !== undefined) update.inputCapabilitiesJson = JSON.stringify(safeInputCapabilities(patch.capability ?? current.capability, patch.inputCapabilities));
     if (patch.outputMapping !== undefined) update.outputMappingJson = JSON.stringify(patch.outputMapping);
+    if (patch.advancedConfig !== undefined) update.advancedConfigJson = JSON.stringify(safeAdvancedConfig(patch.advancedConfig));
+    if (patch.protocolOverride !== undefined) {
+      if (patch.protocolOverride != null && !MODEL_PROTOCOL_TEMPLATES.includes(patch.protocolOverride)) throw new ProviderRuntimeAdminError(422, "MODEL_PROTOCOL_INVALID", "模型协议模板无效");
+      update.protocolOverride = patch.protocolOverride;
+    }
     if (patch.enabled !== undefined) update.enabled = patch.enabled ? 1 : 0;
     if (await trx("o_providerModelProfile").where({ providerId, modelId, revision: expectedRevision }).update(update) !== 1) throw new ProviderRuntimeAdminError(409, "MODEL_REVISION_CONFLICT", "模型配置已被更新");
     await audit(actor, "admin.provider_runtime.model.update", "provider_model", `${providerId}:${modelId}`, { expectedRevision, changedFields: Object.keys(patch).sort().join(",") }, trx);
@@ -142,9 +174,9 @@ export async function listRuntimeModels(actor: AuthUser, input: { page?: number;
     if (input.executionMode) query.where({ executionMode: input.executionMode });
     return query;
   };
-  const [{ count }, rows] = await Promise.all([apply(connection("o_providerModelProfile").clone()).count({ count: "id" }).first() as any, apply(connection("o_providerModelProfile").clone()).select("providerId", "modelId", "displayName", "capability", "executionMode", "inputProfileJson", "parameterSchemaJson", "outputMappingJson", "enabled", "revision").orderBy(["providerId", "modelId"]).limit(pageSize).offset((page - 1) * pageSize)]);
+  const [{ count }, rows] = await Promise.all([apply(connection("o_providerModelProfile").clone()).count({ count: "id" }).first() as any, apply(connection("o_providerModelProfile").clone()).select("providerId", "modelId", "displayName", "capability", "executionMode", "inputProfileJson", "capabilityTagsJson", "inputCapabilitiesJson", "parameterSchemaJson", "advancedConfigJson", "protocolOverride", "outputMappingJson", "enabled", "revision").orderBy(["providerId", "modelId"]).limit(pageSize).offset((page - 1) * pageSize)]);
   const parse = (value: unknown) => { try { return JSON.parse(typeof value === "string" ? value : "{}"); } catch { return {}; } };
-  return { page, pageSize, total: Number(count), items: rows.map((row: any) => ({ providerId: row.providerId, modelId: row.modelId, displayName: row.displayName, capability: row.capability, executionMode: row.executionMode, inputProfile: parse(row.inputProfileJson), parameterSchema: parse(row.parameterSchemaJson), outputMapping: parse(row.outputMappingJson), enabled: Boolean(row.enabled), revision: Number(row.revision) })) };
+  return { page, pageSize, total: Number(count), items: rows.map((row: any) => ({ providerId: row.providerId, modelId: row.modelId, displayName: row.displayName, capability: row.capability, executionMode: row.executionMode, inputProfile: parse(row.inputProfileJson), capabilityTags: Array.isArray(parse(row.capabilityTagsJson)) ? parse(row.capabilityTagsJson) : [], inputCapabilities: normalizeInputCapabilities(row.capability, parse(row.inputCapabilitiesJson)), parameterSchema: parse(row.parameterSchemaJson), advancedConfig: parse(row.advancedConfigJson), protocolOverride: row.protocolOverride ?? null, outputMapping: parse(row.outputMappingJson), enabled: Boolean(row.enabled), revision: Number(row.revision) })) };
 }
 
 export async function listRuntimeProviders(actor: AuthUser, connection: Knex = db) {

@@ -18,6 +18,18 @@ export const VIDEO_FRAME_MODES = [
 
 export type VideoFrameMode = typeof VIDEO_FRAME_MODES[number];
 
+export const MODEL_PROTOCOL_TEMPLATES = [
+  "sync_inline_result",
+  "async_task_poll_result",
+  "async_task_poll_then_final_lookup",
+  "webhook_callback",
+  "runninghub_app",
+  "runninghub_workflow",
+  "legacy_adapter",
+] as const;
+
+export type ModelProtocolTemplate = typeof MODEL_PROTOCOL_TEMPLATES[number];
+
 export interface ReferenceInputCapability {
   enabled: boolean;
   min: number;

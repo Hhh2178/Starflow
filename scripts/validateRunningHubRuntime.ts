@@ -33,14 +33,18 @@ async function main() {
     hostConcurrency: { acquire: async () => ({ leaseId: "validation" }), release: async () => undefined },
   });
   const imageValue = process.env.RUNNINGHUB_APP_IMAGE_VALUE?.trim();
+  const workflowEmptyInput = process.env.RUNNINGHUB_WORKFLOW_EMPTY_INPUT === "1";
   const descriptors: RunningHubDescriptor[] = resourceTypes.map((resourceType) => {
+    const inputMapping: RunningHubDescriptor["inputMapping"] = resourceType === "workflow" && workflowEmptyInput
+      ? {}
+      : { prompt: { nodeId: process.env.RUNNINGHUB_PROMPT_NODE_ID || "1", fieldName: process.env.RUNNINGHUB_PROMPT_FIELD || "prompt" } };
     const uploadMapping: RunningHubDescriptor["uploadMapping"] = resourceType === "app" && imageValue
       ? { image: { nodeId: process.env.RUNNINGHUB_IMAGE_NODE_ID || "1", fieldName: process.env.RUNNINGHUB_IMAGE_FIELD || "image" } }
       : {};
     return {
       providerId: "runninghub", modelId: `real-validation-${resourceType}`, resourceType,
       resourceId: resourceType === "app" ? appId! : workflowId!,
-      inputMapping: { prompt: { nodeId: process.env.RUNNINGHUB_PROMPT_NODE_ID || "1", fieldName: process.env.RUNNINGHUB_PROMPT_FIELD || "prompt" } },
+      inputMapping,
       uploadMapping,
       outputRule: { kind: process.env.RUNNINGHUB_OUTPUT_KIND === "image" ? "image" : process.env.RUNNINGHUB_OUTPUT_KIND === "audio" ? "audio" : "video", path: "data" },
       pollingIntervalMs: 5000, timeoutMs: 600000, enabled: true,

@@ -135,6 +135,7 @@ test("RunningHub real validator supports one-target App acceptance without loggi
   assert.match(source, /RUNNINGHUB_VALIDATION_MODE/);
   assert.match(source, /RUNNINGHUB_APP_IMAGE_VALUE/);
   assert.match(source, /RUNNINGHUB_IMAGE_NODE_ID/);
+  assert.match(source, /RUNNINGHUB_WORKFLOW_EMPTY_INPUT/);
   assert.match(source, /resourceTypes/);
   assert.doesNotMatch(source, /console\.error\(cause instanceof Error \? cause\.message/);
   assert.match(source, /no credential, payload, output or URL was logged/);

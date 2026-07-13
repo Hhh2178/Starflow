@@ -17,6 +17,15 @@ import {
   RuntimeKitRegistryError,
   type RuntimeKitProfileInput,
 } from "@/services/providerRuntime/runtimeKit";
+import {
+  capabilityTemplate,
+  normalizeCapabilityTags,
+  normalizeInputCapabilities,
+} from "@/services/providerRuntime/modelCapabilities";
+import {
+  composeRuntimeConfig,
+  validateAdvancedConfig,
+} from "@/services/providerRuntime/advancedConfig";
 
 const runtimeTables = [
   "o_providerRuntimeProfile",
@@ -154,6 +163,50 @@ async function testRuntimeV2ColumnMigration(): Promise<void> {
   } finally {
     await db.destroy();
   }
+}
+
+function testModelCapabilityContracts(): void {
+  assert.deepEqual(normalizeCapabilityTags(["video_generation", "first_frame_video", "first_frame_video"]), ["video_generation", "first_frame_video"]);
+  assert.throws(() => normalizeCapabilityTags(["unsupported_capability"]), /能力标签/);
+  assert.deepEqual(normalizeInputCapabilities("video", {
+    prompt: true,
+    imageReference: { enabled: true, min: 0, max: 3 },
+    frameModes: ["first_frame", "first_last_frame"],
+  }), {
+    prompt: true,
+    systemPrompt: false,
+    imageReference: { enabled: true, min: 0, max: 3 },
+    frameModes: ["first_frame", "first_last_frame"],
+    mask: false,
+    videoReference: false,
+    audioReference: false,
+  });
+  assert.throws(() => normalizeInputCapabilities("video", { imageReference: { enabled: true, min: 4, max: 2 } }), /引用图|范围/);
+  assert.throws(() => normalizeInputCapabilities("text", { frameModes: ["first_frame"] }), /视频模型/);
+  const textTemplate = capabilityTemplate("text");
+  assert.deepEqual(textTemplate.capabilityTags, ["text_chat"]);
+  assert.deepEqual(textTemplate.parameterSchema.reasoningEffort, undefined);
+  assert.equal(textTemplate.inputCapabilities.prompt, true);
+}
+
+function testAdvancedConfigContracts(): void {
+  assert.throws(() => validateAdvancedConfig({ request: { headers: { Authorization: "Bearer value" } } }), /敏感|凭据/);
+  assert.throws(() => validateAdvancedConfig({ request: { fixedBody: { value: "${process.env.SECRET}" } } }), /表达式|执行/);
+  assert.throws(() => validateAdvancedConfig({ unsupported: {} }), /不支持/);
+  assert.throws(() => validateAdvancedConfig({ polling: { intervalMs: 20, timeoutMs: 1000 } }), /轮询间隔/);
+  const lowerCaseMethod = { request: { method: "post" } };
+  assert.equal(validateAdvancedConfig(lowerCaseMethod).request?.method, "POST");
+  assert.equal(lowerCaseMethod.request.method, "post");
+  const composed = composeRuntimeConfig({
+    template: { request: { fixedBody: { a: 1, shared: "template" } } },
+    provider: { request: { fixedBody: { b: 2, shared: "provider" } } },
+    model: { request: { fixedBody: { c: 3, shared: "model" } } },
+    task: { duration: 8 },
+    parameterSchema: { duration: { type: "integer", min: 4, max: 12 } },
+  });
+  assert.deepEqual(composed.request?.fixedBody, { a: 1, b: 2, c: 3, shared: "model", duration: 8 });
+  assert.throws(() => composeRuntimeConfig({ template: {}, provider: {}, model: {}, task: { unknown: true }, parameterSchema: {} }), /未声明参数/);
+  assert.throws(() => composeRuntimeConfig({ template: {}, provider: {}, model: {}, task: { duration: 20 }, parameterSchema: { duration: { type: "integer", min: 4, max: 12 } } }), /duration/);
 }
 
 async function testProfileService(db: Knex): Promise<void> {
@@ -453,6 +506,8 @@ async function main(): Promise<void> {
   }
   await testLegacyMigration();
   await testRuntimeV2ColumnMigration();
+  testModelCapabilityContracts();
+  testAdvancedConfigContracts();
   await testLegacyAdapterBridge();
   await testRuntimeGateway();
   await testRuntimeKitRegistryMapping();

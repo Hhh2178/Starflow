@@ -152,6 +152,23 @@ function outputs(result: RunningHubRunResult, kind: OutputKind) {
   return urls.map((url) => ({ kind, url }));
 }
 
+function runningHubV2Fetcher(fetcher: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    const url = String(input);
+    if (!/\/openapi\/v2\/run\/workflow\//.test(url) || typeof init?.body !== "string") return fetcher(input, init);
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+    return fetcher(input, {
+      ...init,
+      body: JSON.stringify({
+        addMetadata: true,
+        nodeInfoList: Array.isArray(body.nodeInfoList) ? body.nodeInfoList : [],
+        instanceType: "default",
+        usePersonalQueue: "false",
+      }),
+    });
+  };
+}
+
 export async function createRunningHubExecutionService(options: CreateRunningHubExecutionServiceOptions) {
   const kit = await importRunningHub("aigc-provider-runtime-kit");
   validateRunningHubKeyReferences(options.keys);
@@ -177,7 +194,7 @@ export async function createRunningHubExecutionService(options: CreateRunningHub
         const client = kit.createRunningHubClient({
           apiKey: acquired.key.apiKey,
           baseUrl: options.baseUrl,
-          fetcher: options.fetcher,
+          fetcher: runningHubV2Fetcher(options.fetcher ?? fetch),
           wait: options.wait,
           taskTimeoutMs: descriptor.timeoutMs,
         });

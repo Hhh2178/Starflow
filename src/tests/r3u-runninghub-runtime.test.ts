@@ -92,6 +92,14 @@ for (const resourceType of ["app", "workflow"] as const) {
     assert.equal(calls.length, 2);
     assert.equal(calls[0].authorization, "Bearer rh-secret-value");
     assert.deepEqual(calls[0].body.nodeInfoList, [{ nodeId: "10", fieldName: "text", fieldValue: "hello" }, { nodeId: "20", fieldName: "image", fieldValue: "https://media.invalid/input.png" }]);
+    if (resourceType === "workflow") {
+      assert.deepEqual(calls[0].body, {
+        addMetadata: true,
+        nodeInfoList: [{ nodeId: "10", fieldName: "text", fieldValue: "hello" }, { nodeId: "20", fieldName: "image", fieldValue: "https://media.invalid/input.png" }],
+        instanceType: "default",
+        usePersonalQueue: "false",
+      });
+    }
     assert.equal(hostInFlight, 0);
     assert.equal(counters.size, 0);
   });

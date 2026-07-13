@@ -357,8 +357,8 @@ async function testMigrationRouting(): Promise<void> {
   assert.equal((await gateway.execute(request)).diagnostic.adapterId, "native");
   state = "shadow";
   assert.equal((await gateway.execute(request)).diagnostic.adapterId, "legacy");
-  assert.deepEqual(calls, ["legacy", "native", "legacy", "native"]);
-  assert.equal(shadows.length, 1);
+  assert.deepEqual(calls, ["legacy", "native", "legacy"]);
+  assert.equal(shadows.length, 0);
 }
 
 async function main(): Promise<void> {

@@ -25,8 +25,9 @@ async function main() {
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
     await initDB(db, false, true);
-    await assert.rejects(createRuntimeProvider(admin, { providerId: "native-test", displayName: "Native Test", enabled: true, migrationState: "native", adapterId: "runtime-kit" }, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "SUPER_ADMIN_REQUIRED");
-    assert.deepEqual(await createRuntimeProvider(superAdmin, { providerId: "native-test", displayName: "Native Test", enabled: true, migrationState: "native", adapterId: "runtime-kit" }, db), { providerId: "native-test", revision: 1 });
+    await assert.rejects(createRuntimeProvider(admin, { providerId: "native-test", displayName: "Native Test", enabled: true, migrationState: "legacy", adapterId: "legacy" }, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "SUPER_ADMIN_REQUIRED");
+    await assert.rejects(createRuntimeProvider(superAdmin, { providerId: "unsafe-native", displayName: "Unsafe Native", enabled: true, migrationState: "native", adapterId: "runtime-kit" }, db), (cause: unknown) => cause instanceof ProviderRuntimeAdminError && cause.code === "PROVIDER_MUST_START_LEGACY");
+    assert.deepEqual(await createRuntimeProvider(superAdmin, { providerId: "native-test", displayName: "Native Test", enabled: true, migrationState: "legacy", adapterId: "legacy" }, db), { providerId: "native-test", revision: 1 });
     assert.equal(JSON.parse((await db("o_vendorConfig").where({ id: "native-test" }).first()).inputValues).apiKey, undefined);
     await updateRuntimeProvider(superAdmin, "native-test", 1, { displayName: "Native Updated" }, db);
     await assert.rejects(updateRuntimeProvider(superAdmin, "native-test", 1, { enabled: false }, db), /updated|更新/);

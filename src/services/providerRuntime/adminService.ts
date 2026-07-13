@@ -3,6 +3,7 @@ import type { AuthUser } from "@/types/auth";
 import { db } from "@/utils/db";
 import { writeAudit } from "@/services/auditLog";
 import { ProviderProfileError } from "./profileService";
+import { assertControlledTransition } from "./migrationService";
 
 export class ProviderRuntimeAdminError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
@@ -43,6 +44,7 @@ export async function createRuntimeProvider(actor: AuthUser, input: ProviderInpu
   requireSuperAdmin(actor);
   const providerId = cleanId(input.providerId, "providerId");
   if (!input.displayName.trim() || !input.adapterId.trim()) throw new ProviderRuntimeAdminError(422, "PROVIDER_FIELDS_REQUIRED", "显示名和适配器不能为空");
+  if (input.migrationState !== "legacy" || input.adapterId !== "legacy") throw new ProviderRuntimeAdminError(422, "PROVIDER_MUST_START_LEGACY", "新 Provider 必须从 Legacy Bridge 开始");
   return connection.transaction(async (trx) => {
     if (await trx("o_providerRuntimeProfile").where({ providerId }).first()) throw new ProviderRuntimeAdminError(409, "PROVIDER_CONFLICT", "Provider 已存在");
     const timestamp = Date.now();
@@ -59,6 +61,13 @@ export async function updateRuntimeProvider(actor: AuthUser, providerIdRaw: stri
   return connection.transaction(async (trx) => {
     const current = await trx("o_providerRuntimeProfile").where({ providerId }).first();
     if (!current) throw new ProviderRuntimeAdminError(404, "PROVIDER_NOT_FOUND", "Provider 不存在");
+    if (patch.migrationState !== undefined) {
+      try { assertControlledTransition({ providerId, from: current.migrationState, to: patch.migrationState }); }
+      catch (cause) {
+        if (cause instanceof Error && "code" in cause) throw new ProviderRuntimeAdminError(422, String((cause as { code: unknown }).code), cause.message);
+        throw cause;
+      }
+    }
     const update: Record<string, unknown> = { revision: expectedRevision + 1, updatedAt: Date.now() };
     for (const field of ["displayName", "migrationState", "adapterId"] as const) if (patch[field] !== undefined) update[field] = String(patch[field]).trim();
     if (patch.enabled !== undefined) update.enabled = patch.enabled ? 1 : 0;

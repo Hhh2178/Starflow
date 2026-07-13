@@ -19,25 +19,8 @@ export class ProviderRuntimeGateway {
       const route = await this.routing.resolve(request);
       const legacy = this.requireAdapter("legacy", request);
       if (route.migrationState === "legacy") return legacy.execute(request);
-      const native = this.requireAdapter(route.nativeAdapterId, request);
-      if (route.migrationState === "native") return native.execute(request);
-      const primary = await legacy.execute(request);
-      try {
-        const result = await native.execute(request);
-        await this.routing.onShadowDiagnostic?.({
-          ok: true,
-          adapterId: native.id,
-          resultKind: result.kind,
-          ...(result.taskId ? { taskId: result.taskId } : {}),
-        });
-      } catch (cause) {
-        await this.routing.onShadowDiagnostic?.({
-          ok: false,
-          adapterId: native.id,
-          errorCode: cause instanceof ProviderRuntimeError ? cause.code : "SHADOW_EXECUTION_FAILED",
-        });
-      }
-      return primary;
+      if (route.migrationState === "shadow") return legacy.execute(request);
+      return this.requireAdapter(route.nativeAdapterId, request).execute(request);
     }
     const adapter = await this.registry.find(request);
     if (!adapter) {

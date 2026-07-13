@@ -1,6 +1,5 @@
 import type { Knex } from "knex";
 import type { AuthUser, UserRole } from "@/types/auth";
-import { db } from "@/utils/db";
 
 const SUMMARY_KEYS = new Set([
   "name",
@@ -20,12 +19,27 @@ const SUMMARY_KEYS = new Set([
   "balanceAfter",
   "reason",
   "priority",
+  "from",
+  "to",
+  "modelIdentity",
+  "outputContract",
+  "tokenUsage",
+  "pricingInvariant",
+  "reservationInvariant",
+  "settlementInvariant",
+  "failureReleaseInvariant",
+  "controlledAcceptanceId",
 ]);
 
 const SENSITIVE_TEXT = /password|passwordHash|apiKey|databasePassword|accessToken|refreshToken|secret|token/i;
 
 type AuditScalar = string | number | boolean | null;
 type AuditConnection = Knex | Knex.Transaction;
+
+async function resolveConnection(connection?: AuditConnection): Promise<AuditConnection> {
+  if (connection) return connection;
+  return (await import("@/utils/db")).db;
+}
 
 export interface AuditListInput {
   page?: number;
@@ -129,9 +143,9 @@ export async function writeAudit(
     result: "success" | "failure";
     requestId?: string;
   },
-  connection: AuditConnection = db,
+  connection?: AuditConnection,
 ): Promise<void> {
-  await inTransaction(connection, async (trx) => {
+  await inTransaction(await resolveConnection(connection), async (trx) => {
     const targetRole = await resolveTargetRole(
       trx,
       input.targetType,
@@ -157,7 +171,7 @@ export async function writeAudit(
 export async function listAudit(
   actor: AuthUser,
   input: AuditListInput = {},
-  connection: AuditConnection = db,
+  connection?: AuditConnection,
 ) {
   if (actor.role === "creator") {
     throw new AuditLogError(403, "ADMIN_REQUIRED", "仅管理员可以查看审计日志");
@@ -177,7 +191,8 @@ export async function listAudit(
     throw new AuditLogError(422, "GROUP_ID_INVALID", "分组 ID 必须是正整数");
   }
 
-  const createQuery = () => connection("o_auditLog");
+  const activeConnection = await resolveConnection(connection);
+  const createQuery = () => activeConnection("o_auditLog");
   const applyScope = (query: Knex.QueryBuilder) => {
     if (actor.role === "admin") {
       return query

@@ -80,8 +80,12 @@ async function testFreshSchema(db: Knex): Promise<void> {
 
   const vendors = await db("o_vendorConfig").select("id", "enable", "models").orderBy("id");
   const profiles = await db("o_providerRuntimeProfile").select("*").orderBy("providerId");
-  assert.equal(profiles.length, vendors.length);
-  for (const vendor of vendors) {
+  const validVendors = vendors.filter((vendor) => typeof vendor.id === "string"
+    && vendor.id.trim().length > 0
+    && !["null", "undefined"].includes(vendor.id.trim().toLowerCase()));
+  assert.equal(profiles.length, validVendors.length);
+  assert.equal(profiles.some((profile) => ["", "null", "undefined"].includes(String(profile.providerId).trim().toLowerCase())), false);
+  for (const vendor of validVendors) {
     const profile = profiles.find((item) => item.providerId === vendor.id);
     assert.ok(profile, `missing legacy profile for ${vendor.id}`);
     assert.equal(profile.migrationState, "legacy");
@@ -139,10 +143,13 @@ async function testRuntimeV2ColumnMigration(): Promise<void> {
       table.unique(["providerId", "modelId"]);
     });
     await db("o_vendorConfig").insert({ id: "legacy-v2", inputValues: "{}", models: "[]", enable: 1 });
+    await db("o_vendorConfig").insert({ id: "null", inputValues: "{}", models: "[]", enable: 1 });
     await db("o_providerRuntimeProfile").insert({ providerId: "legacy-v2", displayName: "Legacy V2", enabled: 1, migrationState: "legacy", adapterId: "legacy", revision: 1, createdAt: 1, updatedAt: 1 });
+    await db("o_providerRuntimeProfile").insert({ providerId: "null", displayName: "null", enabled: 1, migrationState: "legacy", adapterId: "legacy", revision: 1, createdAt: 1, updatedAt: 1 });
     await db("o_providerModelProfile").insert({ providerId: "legacy-v2", modelId: "video-a", displayName: "Video A", capability: "video", executionMode: "legacy", enabled: 1, revision: 1, createdAt: 1, updatedAt: 1 });
 
     await migrateProviderRuntimeProfiles(db);
+    assert.equal(await db("o_providerRuntimeProfile").where({ providerId: "null" }).first(), undefined);
     const providerColumns = await columns(db, "o_providerRuntimeProfile");
     const modelColumns = await columns(db, "o_providerModelProfile");
     assert.equal(providerColumns.has("note"), true);

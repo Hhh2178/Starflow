@@ -13,17 +13,34 @@ interface RuntimeColumnSchema {
 }
 
 const now = () => Date.now();
+const invalidLegacyProviderIds = new Set(["", "null", "undefined"]);
+
+function normalizedLegacyProviderId(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const providerId = value.trim();
+  return invalidLegacyProviderIds.has(providerId.toLowerCase()) ? null : providerId;
+}
 
 export async function seedLegacyProviderProfiles(knex: Knex): Promise<void> {
   if (!(await knex.schema.hasTable("o_vendorConfig")) || !(await knex.schema.hasTable("o_providerRuntimeProfile"))) return;
+  const generatedInvalidProfiles = (await knex("o_providerRuntimeProfile")
+    .where({ adapterId: "legacy" })
+    .whereIn("providerId", [...invalidLegacyProviderIds])
+    .select("providerId", "displayName"))
+    .filter((profile) => String(profile.displayName).trim().toLowerCase() === String(profile.providerId).trim().toLowerCase())
+    .map((profile) => String(profile.providerId));
+  if (generatedInvalidProfiles.length > 0) {
+    await knex("o_providerRuntimeProfile").whereIn("providerId", generatedInvalidProfiles).delete();
+  }
   const vendors = await knex("o_vendorConfig").select("id", "enable");
   const existing = new Set(await knex("o_providerRuntimeProfile").pluck("providerId"));
   const createdAt = now();
   const missing = vendors
-    .filter((vendor) => !existing.has(vendor.id))
+    .map((vendor) => ({ ...vendor, providerId: normalizedLegacyProviderId(vendor.id) }))
+    .filter((vendor): vendor is typeof vendor & { providerId: string } => vendor.providerId !== null && !existing.has(vendor.providerId))
     .map((vendor) => ({
-      providerId: String(vendor.id),
-      displayName: String(vendor.id),
+      providerId: vendor.providerId,
+      displayName: vendor.providerId,
       enabled: vendor.enable ? 1 : 0,
       migrationState: "legacy",
       adapterId: "legacy",

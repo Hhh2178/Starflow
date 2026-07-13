@@ -150,6 +150,43 @@ test("AICopy Grok preview rejects missing input images before submission", async
   }
 });
 
+test("GRSAI Nano Banana submits and polls with the legacy contract", async () => {
+  const calls: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = String(init?.method ?? "GET");
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    calls.push({ url, method, body });
+    if (url.endsWith("/v1/draw/nano-banana")) {
+      return new Response(JSON.stringify({ code: 0, data: { id: "grsai_task_1" } }), { status: 200 });
+    }
+    if (url.endsWith("/v1/draw/result")) {
+      return new Response(JSON.stringify({ code: 0, data: { status: "succeeded", results: [{ url: "https://media.invalid/grsai.png" }] } }), { status: 200 });
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const { runtime } = loadVendor("grsai.ts");
+    runtime.vendor.inputValues.apiKey = "test-key";
+    runtime.vendor.inputValues.baseUrl = "https://grsai.invalid";
+    const model = runtime.vendor.models.find((item: { modelName: string }) => item.modelName === "nano-banana-fast");
+    const result = await runtime.imageRequest({ prompt: "星空", size: "1K", aspectRatio: "1:1", referenceList: [] }, model);
+    assert.equal(result, "https://media.invalid/grsai.png");
+    assert.deepEqual(calls, [
+      {
+        url: "https://grsai.invalid/v1/draw/nano-banana",
+        method: "POST",
+        body: { model: "nano-banana-fast", prompt: "星空", aspectRatio: "1:1", webHook: "-1", shutProgress: true, imageSize: "1K" },
+      },
+      { url: "https://grsai.invalid/v1/draw/result", method: "POST", body: { id: "grsai_task_1" } },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("bundled Provider catalog contains MiMo, AICopy, and GRSAI", () => {
   const catalog = JSON.parse(fs.readFileSync(path.join(root, "src", "lib", "vendor.json"), "utf8"));
   assert.equal(typeof catalog["mimo.ts"], "string");

@@ -7,6 +7,10 @@ import {
   ProviderProfileError,
   updateProviderRuntimeProfile,
 } from "@/services/providerRuntime/profileService";
+import { ProviderRuntimeGateway } from "@/services/providerRuntime/gateway";
+import { LegacyVendorAdapter, type LegacyRuntimeLoader } from "@/services/providerRuntime/legacyAdapter";
+import { ProviderRuntimeError, type ProviderExecutionRequest } from "@/services/providerRuntime/contracts";
+import { ProviderRuntimeRegistry } from "@/services/providerRuntime/registry";
 
 const runtimeTables = [
   "o_providerRuntimeProfile",
@@ -147,6 +151,107 @@ async function testLegacyMigration(): Promise<void> {
   }
 }
 
+async function expectRuntimeError(operation: Promise<unknown>, code: string, category: string): Promise<ProviderRuntimeError> {
+  let captured: ProviderRuntimeError | undefined;
+  await assert.rejects(operation, (cause: unknown) => {
+    assert.equal(cause instanceof ProviderRuntimeError, true);
+    captured = cause as ProviderRuntimeError;
+    assert.equal(captured.code, code);
+    assert.equal(captured.category, category);
+    return true;
+  });
+  return captured!;
+}
+
+async function testLegacyAdapterBridge(): Promise<void> {
+  const calls: Array<{ providerId: string; modelId: string; capability: string; input: unknown }> = [];
+  let deferredResolve: ((value: string) => void) | undefined;
+  const loader: LegacyRuntimeLoader = {
+    hasProvider: async (providerId) => ["mimo", "grsai", "aicopy", "slow", "broken"].includes(providerId),
+    load: async (providerId, modelId) => ({
+      model: { modelName: modelId, think: false },
+      runtime: {
+        textRequest: async (_model: unknown, _think: boolean, _level: number) => ({ text: "桥接文本", usage: { inputTokens: 4, outputTokens: 2 } }),
+        imageRequest: async (input: unknown) => {
+          calls.push({ providerId, modelId, capability: "image", input });
+          return "https://media.invalid/image.png";
+        },
+        videoRequest: async (input: unknown) => {
+          calls.push({ providerId, modelId, capability: "video", input });
+          if (providerId === "slow") return await new Promise<string>((resolve) => { deferredResolve = resolve; });
+          if (providerId === "broken") throw new Error("401 Unauthorized Bearer sk-live-secret");
+          return "data:video/mp4;base64,AAAA";
+        },
+      },
+    }),
+  };
+  const adapter = new LegacyVendorAdapter(loader);
+  assert.equal(await adapter.supports({ providerId: "mimo", modelId: "mimo-v2.5", capability: "text" }), true);
+  assert.equal(await adapter.supports({ providerId: "missing", modelId: "none", capability: "text" }), false);
+
+  const base = { timeoutMs: 1000 };
+  const text = await adapter.execute({ ...base, providerId: "mimo", modelId: "mimo-v2.5", capability: "text", input: { think: true, thinkLevel: 2 } });
+  assert.deepEqual(text, {
+    kind: "text",
+    data: { text: "桥接文本", usage: { inputTokens: 4, outputTokens: 2 } },
+    usage: { inputTokens: 4, outputTokens: 2 },
+    diagnostic: { adapterId: "legacy", providerId: "mimo", modelId: "mimo-v2.5" },
+  });
+  const image = await adapter.execute({ ...base, providerId: "grsai", modelId: "nano-banana", capability: "image", input: { prompt: "图像" } });
+  assert.equal(image.kind, "image");
+  assert.deepEqual(image.data, { sourceType: "url", value: "https://media.invalid/image.png" });
+  const video = await adapter.execute({ ...base, providerId: "aicopy", modelId: "grok-video", capability: "video", input: { prompt: "视频" } });
+  assert.equal(video.kind, "video");
+  assert.deepEqual(video.data, { sourceType: "base64", value: "data:video/mp4;base64,AAAA" });
+  assert.equal(calls.length, 2);
+
+  const authError = await expectRuntimeError(
+    adapter.execute({ ...base, providerId: "broken", modelId: "video", capability: "video", input: {} }),
+    "LEGACY_AUTHENTICATION_FAILED",
+    "authentication",
+  );
+  assert.equal(authError.message.includes("sk-live-secret"), false);
+
+  const controller = new AbortController();
+  let completionCount = 0;
+  const cancelled = adapter.execute({ ...base, providerId: "slow", modelId: "video", capability: "video", input: {}, signal: controller.signal })
+    .then(() => { completionCount += 1; }, (cause) => { completionCount += 1; throw cause; });
+  controller.abort();
+  await expectRuntimeError(cancelled, "PROVIDER_CANCELLED", "cancelled");
+  deferredResolve?.("https://media.invalid/late.mp4");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(completionCount, 1);
+
+  await expectRuntimeError(
+    adapter.execute({ providerId: "slow", modelId: "video", capability: "video", input: {}, timeoutMs: 5 }),
+    "PROVIDER_TIMEOUT",
+    "timeout",
+  );
+  deferredResolve?.("https://media.invalid/late-timeout.mp4");
+}
+
+async function testRuntimeGateway(): Promise<void> {
+  const requests: ProviderExecutionRequest[] = [];
+  const registry = new ProviderRuntimeRegistry();
+  registry.register({
+    id: "fake",
+    supports: async ({ providerId }) => providerId === "provider-a",
+    execute: async (request) => {
+      requests.push(request);
+      return { kind: "json", data: { ok: true }, diagnostic: { adapterId: "fake", providerId: request.providerId, modelId: request.modelId } };
+    },
+  });
+  const gateway = new ProviderRuntimeGateway(registry);
+  const result = await gateway.execute({ providerId: "provider-a", modelId: "model-a", capability: "json", input: {}, timeoutMs: 1000 });
+  assert.equal(result.kind, "json");
+  assert.equal(requests.length, 1);
+  await expectRuntimeError(
+    gateway.execute({ providerId: "missing", modelId: "none", capability: "json", input: {}, timeoutMs: 1000 }),
+    "PROVIDER_ADAPTER_NOT_FOUND",
+    "configuration",
+  );
+}
+
 async function main(): Promise<void> {
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
@@ -156,6 +261,8 @@ async function main(): Promise<void> {
     await db.destroy();
   }
   await testLegacyMigration();
+  await testLegacyAdapterBridge();
+  await testRuntimeGateway();
   console.log("R3S provider runtime profile tests passed");
 }
 

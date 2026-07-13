@@ -40,3 +40,22 @@ export function getVendor(id: string) {
   const vendorData = u.vm(jsCode);
   return vendorData.vendor;
 }
+
+export async function hasLegacyVendorRuntime(providerId: string): Promise<boolean> {
+  const row = await u.db("o_vendorConfig").where("id", providerId).select("id").first();
+  return Boolean(row && getCode(providerId));
+}
+
+export async function loadLegacyVendorRuntime(providerId: string, modelId: string): Promise<{ model: any; runtime: any }> {
+  const config = await u.db("o_vendorConfig").where("id", providerId).first();
+  if (!config) throw new Error(`未找到供应商配置 id=${providerId}`);
+  const models = await getModelList(providerId);
+  const model = models.find((item: any) => item.modelName === modelId);
+  if (!model) throw new Error(`未找到模型 ${modelId} id=${providerId}`);
+  const jsCode = transform(getCode(providerId), { transforms: ["typescript"] }).code;
+  const runtime = u.vm(jsCode);
+  if (!runtime?.vendor) throw new Error(`供应商运行时无效 id=${providerId}`);
+  Object.assign(runtime.vendor.inputValues, JSON.parse(config.inputValues ?? "{}"));
+  runtime.vendor.models = models;
+  return { model, runtime };
+}

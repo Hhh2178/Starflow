@@ -53,7 +53,7 @@ async function main() {
   const input = {
     messages: [{ role: "user", content: "请只回复：OK" }],
     temperature: 0,
-    maxOutputTokens: 8,
+    maxOutputTokens: 256,
   };
   if (mode === "native-smoke") {
     const response = await runtime.invoke(`mimo:${modelId}`, input);
@@ -73,7 +73,11 @@ async function main() {
   const billing = compareBillingSnapshots(legacyBilling, nativeBilling);
   const checks = { ...contract.checks, ...billing };
   if (!Object.values(checks).every(Boolean)) {
-    console.error(JSON.stringify({ ok: false, checks }));
+    const legacyTextPresent = typeof (compared.legacy.data as Record<string, unknown>)?.text === "string"
+      && String((compared.legacy.data as Record<string, unknown>).text).trim().length > 0;
+    const nativeTextPresent = typeof (compared.native.data as Record<string, unknown>)?.text === "string"
+      && String((compared.native.data as Record<string, unknown>).text).trim().length > 0;
+    console.error(JSON.stringify({ ok: false, checks, diagnostics: { legacyTextPresent, nativeTextPresent } }));
     throw new Error("MiMo controlled comparison failed");
   }
   const controlledAcceptanceId = `mimo-stage8-${Date.now()}`;

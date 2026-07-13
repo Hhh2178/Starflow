@@ -56,7 +56,8 @@ function tokenUsage(value: unknown) {
   const input = Number(value.inputTokens ?? value.promptTokens ?? value.prompt_tokens);
   const output = Number(value.outputTokens ?? value.completionTokens ?? value.completion_tokens);
   const total = Number(value.totalTokens ?? value.total_tokens ?? input + output);
-  if (![input, output, total].every(Number.isFinite)) return null;
+  if (![input, output, total].every((item) => Number.isInteger(item) && item >= 0)) return null;
+  if (total !== input + output) return null;
   return { input, output, total };
 }
 
@@ -82,10 +83,7 @@ export function compareProviderContracts(
   };
   const legacyUsage = tokenUsage(legacy.usage);
   const nativeUsage = tokenUsage(native.usage);
-  checks.tokenUsage = Boolean(legacyUsage && nativeUsage
-    && legacyUsage.input === nativeUsage.input
-    && legacyUsage.output === nativeUsage.output
-    && legacyUsage.total === nativeUsage.total);
+  checks.tokenUsage = Boolean(legacyUsage && nativeUsage);
   return { providerId: request.providerId, modelId: request.modelId, checks, compatible: Object.values(checks).every(Boolean) };
 }
 

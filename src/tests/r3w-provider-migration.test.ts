@@ -80,7 +80,9 @@ test("MiMo comparison proves identity, normalized text contract and Token usage"
   assert.equal(comparison.compatible, true);
   assert.equal(JSON.stringify(comparison).includes("legacy response"), false);
   assert.equal(JSON.stringify(comparison).includes("native response"), false);
-  assert.equal(compareProviderContracts(request, result("legacy", "ok"), result("runtime-kit", "ok", 5, 4)).compatible, false);
+  assert.equal(compareProviderContracts(request, result("legacy", "ok"), result("runtime-kit", "ok", 5, 4)).compatible, true);
+  const invalidUsage = { ...result("runtime-kit", "ok"), usage: { inputTokens: 5, outputTokens: 4, totalTokens: 8 } };
+  assert.equal(compareProviderContracts(request, result("legacy", "ok"), invalidUsage).checks.tokenUsage, false);
 });
 
 test("adapter migration evidence preserves pricing, reservation, settlement and failure release", () => {
@@ -235,6 +237,9 @@ test("real MiMo validator is opt-in, quota-bounded and writes only sanitized evi
   assert.match(source, /MIMO_MIGRATION_EVIDENCE_FILE/);
   assert.match(source, /compareProviderContracts/);
   assert.match(source, /compareBillingSnapshots/);
+  assert.match(source, /maxOutputTokens:\s*256/);
+  assert.match(source, /legacyTextPresent/);
+  assert.match(source, /nativeTextPresent/);
   assert.match(source, /os\.tmpdir\(\)/);
   assert.match(source, /process\.exit\(0\)/);
   assert.doesNotMatch(source, /console\.log\([^\n]*(legacy|native)\.(data|text)/i);

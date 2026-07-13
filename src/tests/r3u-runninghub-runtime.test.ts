@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 import {
   RunningHubDescriptorError,
@@ -119,4 +120,14 @@ test("RunningHub cancellation releases host and key leases exactly once", async 
   await assert.rejects(service.execute(descriptor("workflow"), { prompt: "cancel", image: "x" }, { signal: controller.signal }), /aborted/i);
   assert.equal(hostReleases, 1);
   assert.equal(keyReleases, 1);
+});
+
+test("RunningHub real validator supports one-target App acceptance without logging secrets or payloads", () => {
+  const source = fs.readFileSync("scripts/validateRunningHubRuntime.ts", "utf8");
+  assert.match(source, /RUNNINGHUB_VALIDATION_MODE/);
+  assert.match(source, /RUNNINGHUB_APP_IMAGE_VALUE/);
+  assert.match(source, /RUNNINGHUB_IMAGE_NODE_ID/);
+  assert.match(source, /resourceTypes/);
+  assert.doesNotMatch(source, /console\.error\(cause instanceof Error \? cause\.message/);
+  assert.match(source, /no credential, payload, output or URL was logged/);
 });

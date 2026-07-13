@@ -54,7 +54,8 @@
     "dist:linux": "yarn build && electron-builder --linux",
     "debug:ai": "npx @ai-sdk/devtools",
     "license": "node scripts/license.ts",
-    "vendor2json": "tsx scripts/vendor2json.ts"
+    "vendor2json": "tsx scripts/vendor2json.ts",
+    "postinstall": "tsc -p node_modules/aigc-provider-runtime-kit/tsconfig.json"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.35",
@@ -67,6 +68,7 @@
     "@huggingface/transformers": "^3.8.1",
     "@rmp135/sql-ts": "^2.2.0",
     "ai": "^6.0.67",
+    "aigc-provider-runtime-kit": "https://github.com/Hhh2178/aigc-provider-runtime-kit.git#9cf7381c783406c9959713867052793927545d2e",
     "axios": "^1.13.2",
     "axios-retry": "^4.5.0",
     "better-sqlite3": "^12.9.0",

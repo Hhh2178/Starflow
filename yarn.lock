@@ -1116,6 +1116,10 @@ aggregate-error@^3.0.0:
     clean-stack "^2.0.0"
     indent-string "^4.0.0"
 
+"aigc-provider-runtime-kit@https://github.com/Hhh2178/aigc-provider-runtime-kit.git#9cf7381c783406c9959713867052793927545d2e":
+  version "0.2.0"
+  resolved "https://github.com/Hhh2178/aigc-provider-runtime-kit.git#9cf7381c783406c9959713867052793927545d2e"
+
 ai@^6.0.67:
   version "6.0.141"
   resolved "https://registry.npmmirror.com/ai/-/ai-6.0.141.tgz"

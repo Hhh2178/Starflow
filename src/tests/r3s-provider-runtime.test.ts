@@ -11,6 +11,12 @@ import { ProviderRuntimeGateway } from "@/services/providerRuntime/gateway";
 import { LegacyVendorAdapter, type LegacyRuntimeLoader } from "@/services/providerRuntime/legacyAdapter";
 import { ProviderRuntimeError, type ProviderExecutionRequest } from "@/services/providerRuntime/contracts";
 import { ProviderRuntimeRegistry } from "@/services/providerRuntime/registry";
+import {
+  buildRuntimeKitRegistry,
+  createStarsRuntimeKitAdapter,
+  RuntimeKitRegistryError,
+  type RuntimeKitProfileInput,
+} from "@/services/providerRuntime/runtimeKit";
 
 const runtimeTables = [
   "o_providerRuntimeProfile",
@@ -252,6 +258,109 @@ async function testRuntimeGateway(): Promise<void> {
   );
 }
 
+function validRuntimeKitProfiles(): RuntimeKitProfileInput {
+  return {
+    providers: [{ providerId: "native-a", displayName: "Native A", enabled: true, migrationState: "native", adapterId: "openai" }],
+    protocols: [{ providerId: "native-a", protocolType: "openai", config: { baseUrl: "https://api.invalid/v1" }, enabled: true }],
+    models: [{ providerId: "native-a", modelId: "chat-a", displayName: "Chat A", capability: "text", parameterSchema: { prompt: { type: "string", required: true } }, enabled: true }],
+  };
+}
+
+async function expectRegistryError(input: RuntimeKitProfileInput, issueCode: string): Promise<void> {
+  await assert.rejects(buildRuntimeKitRegistry(input), (cause: unknown) => {
+    assert.equal(cause instanceof RuntimeKitRegistryError, true);
+    assert.equal((cause as RuntimeKitRegistryError).issues.some((issue) => issue.code === issueCode), true);
+    return true;
+  });
+}
+
+async function testRuntimeKitRegistryMapping(): Promise<void> {
+  const registry = await buildRuntimeKitRegistry(validRuntimeKitProfiles());
+  assert.equal(registry.getProvider("native-a")?.baseUrl, "https://api.invalid/v1");
+  assert.equal(registry.getModel("native-a:chat-a")?.capability, "chat");
+  assert.equal(registry.listModels({ enabledOnly: true }).length, 1);
+
+  const malformedUrl = validRuntimeKitProfiles();
+  malformedUrl.protocols[0].config.baseUrl = "file:///private/secret";
+  await expectRegistryError(malformedUrl, "invalid");
+  const duplicate = validRuntimeKitProfiles();
+  duplicate.providers.push({ ...duplicate.providers[0] });
+  await expectRegistryError(duplicate, "duplicate");
+  const missingAdapter = validRuntimeKitProfiles();
+  missingAdapter.providers[0].adapterId = "";
+  await expectRegistryError(missingAdapter, "required");
+  const disabled = validRuntimeKitProfiles();
+  disabled.models[0].enabled = false;
+  assert.equal((await buildRuntimeKitRegistry(disabled)).listModels({ enabledOnly: true }).length, 0);
+  const malformedSchema = validRuntimeKitProfiles();
+  malformedSchema.models[0].parameterSchema = { prompt: "invalid" } as unknown as Record<string, unknown>;
+  await expectRegistryError(malformedSchema, "invalid_schema");
+}
+
+async function testRuntimeKitOpenAIExecution(): Promise<void> {
+  const profiles = validRuntimeKitProfiles();
+  const diagnostics: unknown[] = [];
+  const calls: unknown[] = [];
+  const adapter = await createStarsRuntimeKitAdapter({
+    profiles,
+    clients: {
+      "native-a": {
+        request: async () => ({}),
+        createImage: async () => ({}),
+        createChatCompletion: async (body: Record<string, unknown>, options?: { signal?: AbortSignal }) => {
+          calls.push({ body, hasSignal: Boolean(options?.signal) });
+          return { choices: [{ message: { content: "native text" } }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }, secret: "sk-runtime-secret" };
+        },
+      },
+    },
+    onDiagnostic: (event) => { diagnostics.push(event); },
+  });
+  const result = await adapter.execute({ providerId: "native-a", modelId: "chat-a", capability: "text", input: { prompt: "hello", messages: [] }, timeoutMs: 1000 });
+  assert.equal(result.kind, "text");
+  assert.deepEqual(result.data, { text: "native text" });
+  assert.deepEqual(result.usage, { inputTokens: 5, outputTokens: 3, totalTokens: 8 });
+  assert.equal(calls.length, 1);
+  assert.equal(JSON.stringify(diagnostics).includes("sk-runtime-secret"), false);
+
+  const timeoutAdapter = await createStarsRuntimeKitAdapter({
+    profiles,
+    clients: {
+      "native-a": {
+        request: async () => await new Promise(() => undefined),
+        createImage: async () => await new Promise(() => undefined),
+        createChatCompletion: async () => await new Promise(() => undefined),
+      },
+    },
+  });
+  await expectRuntimeError(
+    timeoutAdapter.execute({ providerId: "native-a", modelId: "chat-a", capability: "text", input: { prompt: "timeout" }, timeoutMs: 5 }),
+    "EXECUTION_ABORTED",
+    "timeout",
+  );
+}
+
+async function testMigrationRouting(): Promise<void> {
+  const calls: string[] = [];
+  const registry = new ProviderRuntimeRegistry();
+  const result = (adapterId: string, value: string) => ({ kind: "text" as const, data: { text: value }, diagnostic: { adapterId, providerId: "p", modelId: "m" } });
+  registry.register({ id: "legacy", supports: () => true, execute: async () => { calls.push("legacy"); return result("legacy", "legacy"); } });
+  registry.register({ id: "native", supports: () => true, execute: async () => { calls.push("native"); return result("native", "native"); } });
+  let state: "legacy" | "shadow" | "native" = "legacy";
+  const shadows: unknown[] = [];
+  const gateway = new ProviderRuntimeGateway(registry, {
+    resolve: async () => ({ migrationState: state, nativeAdapterId: "native" }),
+    onShadowDiagnostic: async (diagnostic) => { shadows.push(diagnostic); },
+  });
+  const request: ProviderExecutionRequest = { providerId: "p", modelId: "m", capability: "text", input: {}, timeoutMs: 1000 };
+  assert.equal((await gateway.execute(request)).diagnostic.adapterId, "legacy");
+  state = "native";
+  assert.equal((await gateway.execute(request)).diagnostic.adapterId, "native");
+  state = "shadow";
+  assert.equal((await gateway.execute(request)).diagnostic.adapterId, "legacy");
+  assert.deepEqual(calls, ["legacy", "native", "legacy", "native"]);
+  assert.equal(shadows.length, 1);
+}
+
 async function main(): Promise<void> {
   const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
   try {
@@ -263,6 +372,9 @@ async function main(): Promise<void> {
   await testLegacyMigration();
   await testLegacyAdapterBridge();
   await testRuntimeGateway();
+  await testRuntimeKitRegistryMapping();
+  await testRuntimeKitOpenAIExecution();
+  await testMigrationRouting();
   console.log("R3S provider runtime profile tests passed");
 }
 

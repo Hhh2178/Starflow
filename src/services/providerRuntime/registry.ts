@@ -9,6 +9,10 @@ export class ProviderRuntimeRegistry {
     else this.adapters.push(adapter);
   }
 
+  get(id: string): ProviderRuntimeAdapter | undefined {
+    return this.adapters.find((adapter) => adapter.id === id);
+  }
+
   async find(request: Pick<ProviderExecutionRequest, "providerId" | "modelId" | "capability">): Promise<ProviderRuntimeAdapter | undefined> {
     for (const adapter of this.adapters) {
       if (await adapter.supports(request)) return adapter;

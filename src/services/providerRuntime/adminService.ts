@@ -4,6 +4,8 @@ import { db } from "@/utils/db";
 import { writeAudit } from "@/services/auditLog";
 import { ProviderProfileError } from "./profileService";
 import { assertControlledTransition } from "./migrationService";
+import { AdvancedConfigError, validateAdvancedConfig } from "./advancedConfig";
+import { credentialStatusFromInputValues } from "./providerCredentials";
 
 export class ProviderRuntimeAdminError extends Error {
   constructor(public readonly status: number, public readonly code: string, message: string) {
@@ -12,7 +14,7 @@ export class ProviderRuntimeAdminError extends Error {
   }
 }
 
-export interface ProviderInput { providerId: string; displayName: string; enabled: boolean; migrationState: "legacy" | "shadow" | "native"; adapterId: string }
+export interface ProviderInput { providerId: string; displayName: string; enabled: boolean; migrationState: "legacy" | "shadow" | "native"; adapterId: string; note?: string; advancedConfig?: Record<string, unknown> }
 export interface ModelInput { providerId: string; modelId: string; displayName: string; capability: "text" | "image" | "video" | "audio" | "json"; executionMode: "sync" | "background_poll" | "webhook" | "runninghub" | "legacy"; inputProfile?: Record<string, unknown>; parameterSchema?: Record<string, unknown>; outputMapping?: Record<string, unknown>; enabled: boolean }
 export interface ProtocolInput { providerId: string; protocolType: "standard" | "poll" | "webhook" | "runninghub" | "legacy"; config: Record<string, unknown>; enabled: boolean; expectedRevision?: number }
 
@@ -36,6 +38,15 @@ function safeConfig(config: Record<string, unknown>) {
   return serialized;
 }
 
+function safeAdvancedConfig(config: Record<string, unknown>) {
+  try {
+    return validateAdvancedConfig(config);
+  } catch (cause) {
+    if (cause instanceof AdvancedConfigError) throw new ProviderRuntimeAdminError(422, "ADVANCED_CONFIG_INVALID", cause.message);
+    throw cause;
+  }
+}
+
 async function audit(actor: AuthUser, action: string, targetType: string, targetId: string, summary: Record<string, string | number | boolean | null>, connection: Knex) {
   await writeAudit({ actor, groupId: null, action, targetType, targetId, summary, result: "success" }, connection);
 }
@@ -48,7 +59,10 @@ export async function createRuntimeProvider(actor: AuthUser, input: ProviderInpu
   return connection.transaction(async (trx) => {
     if (await trx("o_providerRuntimeProfile").where({ providerId }).first()) throw new ProviderRuntimeAdminError(409, "PROVIDER_CONFLICT", "Provider 已存在");
     const timestamp = Date.now();
-    await trx("o_providerRuntimeProfile").insert({ providerId, displayName: input.displayName.trim(), enabled: input.enabled ? 1 : 0, migrationState: input.migrationState, adapterId: input.adapterId.trim(), revision: 1, createdAt: timestamp, updatedAt: timestamp });
+    const note = input.note?.trim() ?? "";
+    if (note.length > 2000) throw new ProviderRuntimeAdminError(422, "PROVIDER_NOTE_TOO_LONG", "Provider 备注不能超过 2000 个字符");
+    const advancedConfig = safeAdvancedConfig(input.advancedConfig ?? {});
+    await trx("o_providerRuntimeProfile").insert({ providerId, displayName: input.displayName.trim(), enabled: input.enabled ? 1 : 0, migrationState: input.migrationState, adapterId: input.adapterId.trim(), note, advancedConfigJson: JSON.stringify(advancedConfig), revision: 1, createdAt: timestamp, updatedAt: timestamp });
     if (!(await trx("o_vendorConfig").where({ id: providerId }).first())) await trx("o_vendorConfig").insert({ id: providerId, inputValues: "{}", models: "[]", enable: input.enabled ? 1 : 0 });
     await audit(actor, "admin.provider_runtime.create", "provider", providerId, { migrationState: input.migrationState, adapterId: input.adapterId }, trx);
     return { providerId, revision: 1 };
@@ -71,6 +85,12 @@ export async function updateRuntimeProvider(actor: AuthUser, providerIdRaw: stri
     const update: Record<string, unknown> = { revision: expectedRevision + 1, updatedAt: Date.now() };
     for (const field of ["displayName", "migrationState", "adapterId"] as const) if (patch[field] !== undefined) update[field] = String(patch[field]).trim();
     if (patch.enabled !== undefined) update.enabled = patch.enabled ? 1 : 0;
+    if (patch.note !== undefined) {
+      const note = patch.note.trim();
+      if (note.length > 2000) throw new ProviderRuntimeAdminError(422, "PROVIDER_NOTE_TOO_LONG", "Provider 备注不能超过 2000 个字符");
+      update.note = note;
+    }
+    if (patch.advancedConfig !== undefined) update.advancedConfigJson = JSON.stringify(safeAdvancedConfig(patch.advancedConfig));
     if (await trx("o_providerRuntimeProfile").where({ providerId, revision: expectedRevision }).update(update) !== 1) throw new ProviderProfileError(409, "PROVIDER_REVISION_CONFLICT", "Provider 配置已被更新");
     if (patch.enabled !== undefined) await trx("o_vendorConfig").where({ id: providerId }).update({ enable: patch.enabled ? 1 : 0 });
     await audit(actor, "admin.provider_runtime.update", "provider", providerId, { expectedRevision, changedFields: Object.keys(patch).sort().join(",") }, trx);
@@ -131,11 +151,13 @@ export async function listRuntimeProviders(actor: AuthUser, connection: Knex = d
   requireAdmin(actor);
   const rows = await connection("o_providerRuntimeProfile as provider")
     .leftJoin("o_providerProtocolProfile as protocol", "protocol.providerId", "provider.providerId")
-    .select("provider.providerId", "provider.displayName", "provider.enabled", "provider.migrationState", "provider.adapterId", "provider.revision", "protocol.protocolType", "protocol.enabled as protocolEnabled")
+    .leftJoin("o_vendorConfig as vendor", "vendor.id", "provider.providerId")
+    .select("provider.providerId", "provider.displayName", "provider.enabled", "provider.migrationState", "provider.adapterId", "provider.note", "provider.advancedConfigJson", "provider.revision", "protocol.protocolType", "protocol.enabled as protocolEnabled", "vendor.inputValues")
     .orderBy("provider.displayName");
   const counts = await connection("o_providerModelProfile").select("providerId").count({ count: "id" }).groupBy("providerId");
   const countByProvider = new Map(counts.map((row: any) => [String(row.providerId), Number(row.count)]));
-  return rows.map((row) => ({ ...row, enabled: Boolean(row.enabled), protocolEnabled: row.protocolEnabled == null ? null : Boolean(row.protocolEnabled), modelCount: countByProvider.get(String(row.providerId)) ?? 0 }));
+  const parse = (value: unknown) => { try { return JSON.parse(typeof value === "string" ? value : "{}"); } catch { return {}; } };
+  return rows.map((row) => ({ providerId: row.providerId, displayName: row.displayName, enabled: Boolean(row.enabled), migrationState: row.migrationState, adapterId: row.adapterId, note: row.note ?? "", advancedConfig: parse(row.advancedConfigJson), revision: row.revision, protocolType: row.protocolType ?? null, protocolEnabled: row.protocolEnabled == null ? null : Boolean(row.protocolEnabled), credential: credentialStatusFromInputValues(row.inputValues), modelCount: countByProvider.get(String(row.providerId)) ?? 0 }));
 }
 
 async function modelReferences(connection: Knex, providerId: string, modelId: string) {

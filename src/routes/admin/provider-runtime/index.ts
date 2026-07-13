@@ -9,15 +9,20 @@ import {
   getRuntimeProtocol, listRuntimeModels, listRuntimeProviders, listRuntimeTestHistory, runRuntimeTest,
   updateRuntimeModel, updateRuntimeProvider, upsertRuntimeProtocol,
 } from "@/services/providerRuntime/adminService";
+import {
+  clearProviderCredential, getProviderCredentialStatus, probeProviderConnection, probeProviderDraft, replaceProviderCredential,
+} from "@/services/providerRuntime/providerCredentials";
 
 const id = z.string().trim().min(1).max(128);
-const provider = z.strictObject({ providerId: id, displayName: z.string().trim().min(1).max(200), enabled: z.boolean(), migrationState: z.enum(["legacy", "shadow", "native"]), adapterId: id });
+const advancedConfig = z.record(z.string(), z.unknown());
+const provider = z.strictObject({ providerId: id, displayName: z.string().trim().min(1).max(200), enabled: z.boolean(), migrationState: z.enum(["legacy", "shadow", "native"]), adapterId: id, note: z.string().max(2000).optional(), advancedConfig: advancedConfig.optional() });
 const model = z.strictObject({ providerId: id, modelId: id, displayName: z.string().trim().min(1).max(200), capability: z.enum(["text", "image", "video", "audio", "json"]), executionMode: z.enum(["sync", "background_poll", "webhook", "runninghub", "legacy"]), inputProfile: z.record(z.string(), z.unknown()).optional(), parameterSchema: z.record(z.string(), z.unknown()).optional(), outputMapping: z.record(z.string(), z.unknown()).optional(), enabled: z.boolean() });
 const protocol = z.strictObject({ providerId: id, protocolType: z.enum(["standard", "poll", "webhook", "runninghub", "legacy"]), config: z.record(z.string(), z.unknown()), enabled: z.boolean(), expectedRevision: z.number().int().positive().optional() });
 
 function sendFailure(res: express.Response, cause: unknown) {
   const known = cause as { status?: number; code?: string; message?: string };
-  return res.status(Number(known.status ?? 500)).send(error(known.message ?? "Provider Runtime 操作失败", { code: known.code ?? "PROVIDER_RUNTIME_FAILED" }));
+  if (Number.isInteger(known.status) && typeof known.code === "string") return res.status(Number(known.status)).send(error(known.message ?? "Provider Runtime 操作失败", { code: known.code }));
+  return res.status(500).send(error("Provider Runtime 操作失败", { code: "PROVIDER_RUNTIME_FAILED" }));
 }
 
 export function createProviderRuntimeAdminRouter() {
@@ -33,6 +38,17 @@ export function createProviderRuntimeAdminRouter() {
     const { expectedRevision, ...patch } = parsed.data; try { return res.send(success(await updateRuntimeProvider(getAuthUser(req), req.params.providerId, expectedRevision, patch))); } catch (cause) { return sendFailure(res, cause); }
   });
   router.delete("/providers/:providerId", async (req, res) => { try { return res.send(success(await deleteRuntimeProvider(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
+  router.get("/providers/:providerId/credential", async (req, res) => { try { return res.send(success(await getProviderCredentialStatus(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
+  router.put("/providers/:providerId/credential", async (req, res) => {
+    const parsed = z.strictObject({ credential: z.string().trim().min(8).max(8192) }).safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" }));
+    try { return res.send(success(await replaceProviderCredential(getAuthUser(req), req.params.providerId, parsed.data.credential))); } catch (cause) { return sendFailure(res, cause); }
+  });
+  router.delete("/providers/:providerId/credential", async (req, res) => { try { return res.send(success(await clearProviderCredential(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
+  router.post("/providers/probe-draft", async (req, res) => {
+    const parsed = z.strictObject({ baseUrl: z.string().trim().min(1).max(2048), credential: z.string().trim().min(8).max(8192), protocolType: z.enum(["standard", "poll", "webhook", "runninghub", "legacy"]) }).safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" }));
+    try { return res.send(success(await probeProviderDraft(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); }
+  });
+  router.post("/providers/:providerId/probe", async (req, res) => { try { return res.send(success(await probeProviderConnection(getAuthUser(req), req.params.providerId))); } catch (cause) { return sendFailure(res, cause); } });
   router.post("/models", async (req, res) => { const parsed = model.safeParse(req.body); if (!parsed.success) return res.status(400).send(error("参数无效", { code: "INVALID_PARAMETERS" })); try { return res.send(success(await createRuntimeModel(getAuthUser(req), parsed.data))); } catch (cause) { return sendFailure(res, cause); } });
   router.patch("/models/:providerId/:modelId", async (req, res) => {
     const parsed = model.omit({ providerId: true, modelId: true }).partial().extend({ expectedRevision: z.number().int().positive() }).safeParse(req.body);

@@ -2,12 +2,16 @@ export type SelectableModelType = "text" | "image" | "video" | "all";
 
 export interface SelectableProvider {
   id: string;
+  name: string;
+  enabled: boolean;
 }
 
-export interface SelectableLegacyModel {
-  name: string;
-  modelName: string;
-  type: string;
+export interface SelectableRuntimeModel {
+  providerId: string;
+  modelId: string;
+  displayName: string;
+  capability: string;
+  enabled: boolean;
 }
 
 export interface SelectableModel {
@@ -18,29 +22,27 @@ export interface SelectableModel {
   name: string;
 }
 
-export async function buildSelectableModelList(
+export function buildSelectableModelList(
   type: SelectableModelType,
   providers: SelectableProvider[],
-  loadModels: (providerId: string) => Promise<SelectableLegacyModel[]>,
-  loadProvider: (providerId: string) => Promise<{ name: string }>,
-): Promise<SelectableModel[]> {
-  if (providers.length === 0) return [];
-
-  const modelLists = await Promise.all(providers.map((provider) => loadModels(provider.id)));
-  const result = await Promise.all(
-    providers.map(async (provider, index) => {
-      const providerData = await loadProvider(provider.id);
-      const models = modelLists[index];
-      const filtered = type === "all" ? models.filter((item) => item.type !== "video") : models.filter((item) => item.type === type);
-      return filtered.map((item) => ({
-        id: provider.id,
-        label: item.name,
-        value: item.modelName,
-        type: item.type,
-        name: providerData.name,
-      }));
-    }),
+  models: SelectableRuntimeModel[],
+): SelectableModel[] {
+  const providerById = new Map(
+    providers
+      .filter((provider) => provider.enabled)
+      .map((provider) => [provider.id, provider] as const),
   );
 
-  return result.flat();
+  return models.flatMap((model) => {
+    const provider = providerById.get(model.providerId);
+    const capabilityMatches = type === "all" ? model.capability !== "video" : model.capability === type;
+    if (!provider || !model.enabled || !capabilityMatches) return [];
+    return [{
+      id: provider.id,
+      label: model.displayName,
+      value: model.modelId,
+      type: model.capability,
+      name: provider.name,
+    }];
+  });
 }

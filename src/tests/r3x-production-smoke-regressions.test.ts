@@ -2,36 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildSelectableModelList } from "@/services/selectableModels";
 
-test("an empty enabled Provider set is a successful empty model catalog", async () => {
-  let modelLoads = 0;
-  let providerLoads = 0;
-  const result = await buildSelectableModelList(
-    "all",
-    [],
-    async () => {
-      modelLoads += 1;
-      return [];
-    },
-    async () => {
-      providerLoads += 1;
-      return { name: "unused" };
-    },
-  );
-
+test("an empty enabled Provider set is a successful empty model catalog", () => {
+  const result = buildSelectableModelList("all", [], []);
   assert.deepEqual(result, []);
-  assert.equal(modelLoads, 0);
-  assert.equal(providerLoads, 0);
 });
 
-test("selectable models keep Provider identity and requested capability filtering", async () => {
-  const result = await buildSelectableModelList(
+test("selectable models publish only enabled V2 Provider models", () => {
+  const result = buildSelectableModelList(
     "image",
-    [{ id: "fixture-provider" }],
-    async () => [
-      { name: "文本模型", modelName: "text-model", type: "text" },
-      { name: "图片模型", modelName: "image-model", type: "image" },
+    [
+      { id: "fixture-provider", name: "Fixture Provider", enabled: true },
+      { id: "disabled-provider", name: "Disabled Provider", enabled: false },
     ],
-    async () => ({ name: "Fixture Provider" }),
+    [
+      { providerId: "fixture-provider", modelId: "text-model", displayName: "文本模型", capability: "text", enabled: true },
+      { providerId: "fixture-provider", modelId: "image-model", displayName: "图片模型", capability: "image", enabled: true },
+      { providerId: "fixture-provider", modelId: "disabled-image", displayName: "未启用图片", capability: "image", enabled: false },
+      { providerId: "disabled-provider", modelId: "hidden-image", displayName: "隐藏图片", capability: "image", enabled: true },
+    ],
   );
 
   assert.deepEqual(result, [{ id: "fixture-provider", label: "图片模型", value: "image-model", type: "image", name: "Fixture Provider" }]);

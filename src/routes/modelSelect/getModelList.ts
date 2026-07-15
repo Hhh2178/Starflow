@@ -13,13 +13,25 @@ export default router.post(
   }),
   async (req, res) => {
     const { type } = req.body;
-    const providers = await u.db("o_vendorConfig").select("id").where("enable", 1);
-    const result = await buildSelectableModelList(
-      type,
-      providers.map((provider) => ({ id: String(provider.id) })),
-      (providerId) => u.vendor.getModelList(providerId),
-      (providerId) => u.vendor.getVendor(providerId),
-    );
+    const [providerRows, modelRows] = await Promise.all([
+      u.db("o_providerRuntimeProfile")
+        .select("providerId", "displayName", "enabled")
+        .orderBy("displayName"),
+      u.db("o_providerModelProfile")
+        .select("providerId", "modelId", "displayName", "capability", "enabled")
+        .orderBy(["providerId", "displayName"]),
+    ]);
+    const result = buildSelectableModelList(type, providerRows.map((provider) => ({
+      id: String(provider.providerId),
+      name: String(provider.displayName),
+      enabled: Boolean(provider.enabled),
+    })), modelRows.map((model) => ({
+      providerId: String(model.providerId),
+      modelId: String(model.modelId),
+      displayName: String(model.displayName),
+      capability: String(model.capability),
+      enabled: Boolean(model.enabled),
+    })));
     res.status(200).send(success(result));
   },
 );

@@ -1,9 +1,11 @@
 import u from "@/utils";
-import type { GenerationExecutionResult, ReferenceList } from "@/types/generationQueue";
+import type { GenerationExecutionContext, GenerationExecutionResult, ReferenceList } from "@/types/generationQueue";
 import type { VideoGenerationPayload } from "@/jobs/handlers/videoGeneration";
+import { runWithVideoSubmissionMarker } from "@/jobs/handlers/videoSubmissionBoundary";
 
 export async function executeCoreVideoGeneration(
   payload: VideoGenerationPayload,
+  context: GenerationExecutionContext,
 ): Promise<GenerationExecutionResult<unknown>> {
   const video = await u.db("o_video").where({ id: payload.targetId, projectId: payload.projectId }).first();
   if (!video?.filePath) throw new Error("视频占位记录不存在");
@@ -30,7 +32,7 @@ export async function executeCoreVideoGeneration(
       try { mode = JSON.parse(mode); } catch { /* 使用原始模式 */ }
     }
     const aiVideo = u.Ai.Video(payload.model as `${string}:${string}`);
-    await aiVideo.run({
+    await runWithVideoSubmissionMarker(context, () => aiVideo.run({
       prompt: payload.prompt,
       referenceList: referenceList as ReferenceList[],
       mode: mode as any,
@@ -38,7 +40,7 @@ export async function executeCoreVideoGeneration(
       aspectRatio: payload.aspectRatio,
       resolution: payload.resolution,
       audio: payload.audio,
-    });
+    }));
     await aiVideo.save(String(video.filePath));
     await u.db("o_video").where({ id: payload.targetId }).update({ state: "已完成", errorReason: null });
     return {

@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { transform } from "sucrase";
 import { VM } from "vm2";
+import { runWithVideoSubmissionMarker } from "@/jobs/handlers/videoSubmissionBoundary";
 
 const root = process.cwd();
 
@@ -119,6 +120,54 @@ test("AICopy Grok preview submits JSON and polls the returned task", async () =>
   }
 });
 
+test("AICopy Grok preview retries transient polling failures without resubmitting", async () => {
+  const calls: string[] = [];
+  const originalFetch = globalThis.fetch;
+  let pollAttempts = 0;
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.endsWith("/v1/videos")) {
+      return new Response(JSON.stringify({ task_id: "task_preview_retry", status: "queued" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    if (url.endsWith("/v1/videos/task_preview_retry")) {
+      pollAttempts += 1;
+      if (pollAttempts === 1) return new Response("bad gateway", { status: 502 });
+      return new Response(
+        JSON.stringify({ status: "completed", video_url: "https://media.invalid/retried.mp4" }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    return new Response("not found", { status: 404 });
+  };
+
+  try {
+    const { runtime } = loadVendor("aicopy.ts");
+    runtime.vendor.inputValues.apiKey = "test-key";
+    runtime.vendor.inputValues.baseUrl = "https://api.aicopy.top";
+    const result = await runtime.videoRequest(
+      {
+        prompt: "镜头固定",
+        duration: 6,
+        resolution: "720p",
+        aspectRatio: "16:9",
+        mode: "singleImage",
+        referenceList: [{ type: "image", sourceType: "base64", base64: "data:image/png;base64,AAAA" }],
+      },
+      runtime.vendor.models[0],
+    );
+
+    assert.equal(result, "https://media.invalid/retried.mp4");
+    assert.equal(pollAttempts, 2);
+    assert.equal(calls.filter((url) => url.endsWith("/v1/videos")).length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("AICopy Grok preview rejects missing input images before submission", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
@@ -148,6 +197,23 @@ test("AICopy Grok preview rejects missing input images before submission", async
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("core video execution marks external state before invoking a Provider", async () => {
+  const markers: string[] = [];
+  const context = {
+    jobId: 41,
+    setProviderRequestId: async (value: string) => { markers.push(value); },
+  } as any;
+
+  await assert.rejects(
+    runWithVideoSubmissionMarker(context, async () => {
+      assert.deepEqual(markers, ["video:41"]);
+      throw new Error("temporary polling failure");
+    }),
+    /temporary polling failure/,
+  );
+  assert.deepEqual(markers, ["video:41"]);
 });
 
 test("GRSAI Nano Banana submits and polls with the legacy contract", async () => {

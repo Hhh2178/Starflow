@@ -145,6 +145,7 @@ const videoRequest = async (config: VideoConfig, model: VideoModel): Promise<str
         headers: headers(),
       });
       const text = await response.text();
+      if (response.status >= 500) return { completed: false };
       if (!response.ok) throw new Error(`视频任务查询失败：${text}`);
       const data = JSON.parse(text);
       const status = responseStatus(data);
